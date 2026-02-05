@@ -63,12 +63,28 @@ class Classifier(nn.Module):
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
+            # Keep BatchNorm in eval mode to use pretrained running statistics
+            # instead of batch statistics, ensuring consistent behavior
+            self.backbone.eval()
 
         # Classification head
         self.head = nn.Sequential(
             nn.Dropout(p=dropout) if dropout > 0 else nn.Identity(),
             nn.Linear(self.feature_dim, 1),
         )
+
+    def train(self, mode: bool = True) -> "Classifier":
+        """
+        Set the module in training mode.
+
+        Overridden to keep the frozen backbone in eval mode, ensuring BatchNorm
+        layers use pretrained running statistics instead of batch statistics.
+        """
+        super().train(mode)
+        if self.freeze_backbone:
+            # Keep backbone in eval mode even when training the head
+            self.backbone.eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

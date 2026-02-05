@@ -11,25 +11,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import random
+import shutil
 import sys
 import time
-import warnings
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
-
-
-def _worker_init_fn(worker_id: int) -> None:
-    """Suppress warnings in DataLoader worker processes to keep tqdm clean."""
-    warnings.filterwarnings("ignore")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +33,15 @@ from stream_active_fl.data import (
     get_default_transforms,
 )
 from stream_active_fl.models import Classifier
+from stream_active_fl.utils import (
+    MetricsLogger,
+    compute_metrics,
+    create_run_dir,
+    evaluate,
+    save_run_info,
+    set_seed,
+    worker_init_fn,
+)
 
 
 # =============================================================================
@@ -93,18 +96,8 @@ class Config:
 
 
 # =============================================================================
-# Training utilities
+# Dataset utilities
 # =============================================================================
-
-def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
 
 def compute_pos_weight(dataset: ZODFrameDataset) -> float:
     """Compute pos_weight for BCEWithLogitsLoss based on class imbalance."""
@@ -115,46 +108,8 @@ def compute_pos_weight(dataset: ZODFrameDataset) -> float:
     return num_negative / num_positive
 
 
-def compute_metrics(
-    preds: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5
-) -> Dict[str, float]:
-    """
-    Compute classification metrics.
-
-    Args:
-        preds: Predicted probabilities (after sigmoid).
-        targets: Ground truth labels (0 or 1).
-        threshold: Classification threshold.
-
-    Returns:
-        Dict with accuracy, precision, recall, f1.
-    """
-    pred_labels = (preds >= threshold).float()
-
-    tp = ((pred_labels == 1) & (targets == 1)).sum().item()
-    fp = ((pred_labels == 1) & (targets == 0)).sum().item()
-    fn = ((pred_labels == 0) & (targets == 1)).sum().item()
-    tn = ((pred_labels == 0) & (targets == 0)).sum().item()
-
-    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-8)
-    precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
-    f1 = 2 * precision * recall / (precision + recall + 1e-8)
-
-    return {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "tn": tn,
-    }
-
-
 # =============================================================================
-# Training and evaluation loops
+# Training loop
 # =============================================================================
 
 def train_one_epoch(
@@ -207,55 +162,14 @@ def train_one_epoch(
     return metrics
 
 
-@torch.no_grad()
-def evaluate(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
-    desc: str = "Eval",
-) -> Dict[str, float]:
-    """Evaluate on a dataset."""
-    model.eval()
-
-    total_loss = 0.0
-    all_preds = []
-    all_targets = []
-    num_batches = 0
-
-    pbar = tqdm(loader, desc=desc, leave=False)
-    for batch in pbar:
-        if batch is None:
-            continue
-
-        images = batch["image"].to(device)
-        targets = batch["target"].to(device)
-
-        logits = model(images)
-        loss = criterion(logits, targets)
-
-        total_loss += loss.item()
-        num_batches += 1
-
-        probs = torch.sigmoid(logits)
-        all_preds.append(probs.cpu())
-        all_targets.append(targets.cpu())
-
-    # Compute metrics
-    all_preds = torch.cat(all_preds)
-    all_targets = torch.cat(all_targets)
-    metrics = compute_metrics(all_preds, all_targets)
-    metrics["loss"] = total_loss / max(num_batches, 1)
-
-    return metrics
-
-
 # =============================================================================
 # Main
 # =============================================================================
 
-def main(config: Config) -> None:
+def main(config: Config, config_path: Path, command: str) -> None:
     """Run offline baseline training."""
+
+    start_time = datetime.now()
 
     print("=" * 60)
     print("Offline Baseline Training")
@@ -266,10 +180,14 @@ def main(config: Config) -> None:
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Resolve paths
+    # Resolve paths and create timestamped run directory
     annotations_dir = PROJECT_ROOT / config.annotations_dir
-    output_dir = PROJECT_ROOT / config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_output_dir = PROJECT_ROOT / config.output_dir
+    run_dir = create_run_dir(base_output_dir)
+    print(f"Run directory: {run_dir}")
+
+    # Copy config file to run directory
+    shutil.copy(config_path, run_dir / "config.yaml")
 
     # Transforms
     train_transform, val_transform = get_default_transforms()
@@ -298,6 +216,31 @@ def main(config: Config) -> None:
         verbose=True,
     )
 
+    # Collect dataset info for logging
+    train_pos = sum(1 for _, _, t, _ in train_dataset.samples if t == 1.0)
+    val_pos = sum(1 for _, _, t, _ in val_dataset.samples if t == 1.0)
+    dataset_info = {
+        "train_total": len(train_dataset),
+        "train_positive": train_pos,
+        "train_negative": len(train_dataset) - train_pos,
+        "val_total": len(val_dataset),
+        "val_positive": val_pos,
+        "val_negative": len(val_dataset) - val_pos,
+    }
+
+    # Save initial run info
+    save_run_info(
+        run_dir=run_dir,
+        config=config,
+        command=command,
+        start_time=start_time,
+        dataset_info=dataset_info,
+        repo_path=PROJECT_ROOT,
+    )
+
+    # Initialize metrics logger
+    metrics_logger = MetricsLogger(run_dir)
+
     # Data loaders
     train_loader = DataLoader(
         train_dataset,
@@ -306,7 +249,7 @@ def main(config: Config) -> None:
         num_workers=config.num_workers,
         collate_fn=collate_drop_none,
         pin_memory=True,
-        worker_init_fn=_worker_init_fn,
+        worker_init_fn=worker_init_fn,
     )
 
     val_loader = DataLoader(
@@ -316,7 +259,7 @@ def main(config: Config) -> None:
         num_workers=config.num_workers,
         collate_fn=collate_drop_none,
         pin_memory=True,
-        worker_init_fn=_worker_init_fn,
+        worker_init_fn=worker_init_fn,
     )
 
     # Model
@@ -353,6 +296,7 @@ def main(config: Config) -> None:
     print("=" * 60)
 
     best_val_f1 = 0.0
+    best_epoch = 0
     history = {"train": [], "val": []}
 
     for epoch in range(1, config.epochs + 1):
@@ -375,6 +319,7 @@ def main(config: Config) -> None:
         )
 
         # Validate
+        val_metrics = None
         if epoch % config.eval_every_n_epochs == 0:
             val_metrics = evaluate(
                 model, val_loader, criterion, device, desc=f"Epoch {epoch} [Val]"
@@ -392,7 +337,8 @@ def main(config: Config) -> None:
             # Save best model
             if val_metrics["f1"] > best_val_f1:
                 best_val_f1 = val_metrics["f1"]
-                checkpoint_path = output_dir / "best_model.pt"
+                best_epoch = epoch
+                checkpoint_path = run_dir / "best_model.pt"
                 torch.save(
                     {
                         "epoch": epoch,
@@ -405,8 +351,11 @@ def main(config: Config) -> None:
                 )
                 print(f"         Saved best model (F1={best_val_f1:.4f})")
 
+        # Log metrics to CSV
+        metrics_logger.log_epoch(epoch, train_metrics, val_metrics, epoch_time)
+
     # Save final model
-    final_path = output_dir / "final_model.pt"
+    final_path = run_dir / "final_model.pt"
     torch.save(
         {
             "epoch": config.epochs,
@@ -418,12 +367,27 @@ def main(config: Config) -> None:
         final_path,
     )
 
+    # Save final run info with results
+    end_time = datetime.now()
+    save_run_info(
+        run_dir=run_dir,
+        config=config,
+        command=command,
+        start_time=start_time,
+        end_time=end_time,
+        best_epoch=best_epoch,
+        best_metric=best_val_f1,
+        best_metric_name="val_f1",
+        dataset_info=dataset_info,
+        repo_path=PROJECT_ROOT,
+    )
+
     # Final summary
     print("\n" + "=" * 60)
     print("Training complete!")
     print("=" * 60)
-    print(f"Best validation F1: {best_val_f1:.4f}")
-    print(f"Checkpoints saved to: {output_dir}")
+    print(f"Best validation F1: {best_val_f1:.4f} (epoch {best_epoch})")
+    print(f"Run directory: {run_dir}")
 
 
 if __name__ == "__main__":
@@ -441,5 +405,8 @@ if __name__ == "__main__":
         print(f"Config file not found: {config_path}")
         sys.exit(1)
 
+    # Reconstruct the command for logging
+    command = " ".join(sys.argv)
+
     config = Config.from_yaml(config_path)
-    main(config)
+    main(config, config_path, command)
