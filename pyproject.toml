@@ -1,0 +1,40 @@
+[project]
+name = "stream-active-fl"
+version = "0.1.0"
+description = "Continuous, Active Federated Learning for Data Streams"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy",
+    "pillow",
+    "tqdm",
+    "pyyaml",
+    "zod",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Tell pyright/basedpyright where to find packages
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["src", "experiments"]
+extraPaths = ["src"]
+
+[tool.basedpyright]
+pythonVersion = "3.10"
+include = ["src", "experiments"]
+extraPaths = ["src"]

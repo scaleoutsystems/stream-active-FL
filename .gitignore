@@ -205,3 +205,29 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# =============================================================================
+# Project-specific artifacts
+# =============================================================================
+
+# Training outputs (checkpoints, logs, saved models)
+outputs/
+
+# Model checkpoint files
+*.pt
+*.pth
+*.onnx
+*.ckpt
+checkpoints/
+
+# Experiment tracking
+wandb/
+mlruns/
+
+# TensorBoard logs
+runs/
+logs/
+tensorboard/
+
+# Generated annotations
+data/annotations_*/
