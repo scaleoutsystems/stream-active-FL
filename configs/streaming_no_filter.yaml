@@ -1,0 +1,46 @@
+# Streaming baseline: no filtering (train on every item)
+# This establishes the streaming baseline for comparison
+
+# Paths
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
+annotations_dir: "data/annotations_ZODCropped"   # relative to project root
+output_dir: "outputs/streaming_no_filter"        # checkpoints and logs
+
+# Dataset
+target_category: 0        # 0=person, 1=car, 2=traffic_light
+min_score: 0.5            # minimum detection score to count as positive
+subsample_steps: 5        # 1=all frames, 5=every 5th frame
+
+# Model
+backbone: "resnet50"
+pretrained: true
+freeze_backbone: true     # train only classification head
+dropout: 0.0
+load_checkpoint: null     # optional path to pretrained checkpoint
+
+# Training
+learning_rate: 1.0e-3
+weight_decay: 1.0e-4
+
+# Class imbalance
+pos_weight: "auto"
+
+# Filtering
+filter_policy: "none"      # no filtering, train on every item
+
+# Replay buffer
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 32
+replay_admission_policy: "reservoir"    # fifo, random, or reservoir
+store_filtered_items: true
+
+# Evaluation
+eval_every_n_items: 5000   # evaluate on val stream every N items
+checkpoint_interval: 1000  # log metrics every N items
+
+# Reproducibility
+seed: 42
+
+# Device
+device: "cuda"             # "cuda" or "cpu"

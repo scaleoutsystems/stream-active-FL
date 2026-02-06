@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from stream_active_fl.utils.training import compute_metrics
+from .metrics import compute_metrics
 
 
 @torch.no_grad()

@@ -14,6 +14,7 @@ import argparse
 import shutil
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,23 +26,20 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
 
+# Suppress NVML warning (cosmetic, GPU still works fine)
+warnings.filterwarnings("ignore", message="Can't initialize NVML")
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from stream_active_fl.data import (
+from stream_active_fl.core import (
     ZODFrameDataset,
     collate_drop_none,
     get_default_transforms,
 )
+from stream_active_fl.evaluation import compute_metrics, evaluate_offline
+from stream_active_fl.logging import MetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.models import Classifier
-from stream_active_fl.utils import (
-    MetricsLogger,
-    compute_metrics,
-    create_run_dir,
-    evaluate,
-    save_run_info,
-    set_seed,
-    worker_init_fn,
-)
+from stream_active_fl.utils import set_seed, worker_init_fn
 
 
 # =============================================================================
@@ -321,7 +319,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         # Validate
         val_metrics = None
         if epoch % config.eval_every_n_epochs == 0:
-            val_metrics = evaluate(
+            val_metrics = evaluate_offline(
                 model, val_loader, criterion, device, desc=f"Epoch {epoch} [Val]"
             )
             history["val"].append(val_metrics)

@@ -1,0 +1,495 @@
+"""
+Streaming baseline training experiment.
+
+Trains a classifier on ZOD sequences in strict temporal order with optional
+filtering and replay. This is the core streaming learning pipeline.
+
+Usage:
+    python experiments/streaming_baseline.py --config configs/streaming_no_filter.yaml
+    python experiments/streaming_baseline.py --config configs/streaming_with_filter.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import time
+import warnings
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Literal, Optional
+
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+import yaml
+
+# Suppress NVML warning (cosmetic, GPU still works fine)
+warnings.filterwarnings("ignore", message="Can't initialize NVML")
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+from stream_active_fl.core import StreamingDataset, get_default_transforms
+from stream_active_fl.evaluation import evaluate_streaming
+from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
+from stream_active_fl.memory import ReplayBuffer
+from stream_active_fl.models import Classifier
+from stream_active_fl.policies import (
+    DifficultyBasedPolicy,
+    FilterPolicy,
+    NoFilterPolicy,
+    TopKPolicy,
+)
+from stream_active_fl.utils import set_seed
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+@dataclass
+class Config:
+    """Streaming experiment configuration."""
+
+    # Paths
+    dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZODCropped"
+    annotations_dir: str = "data/annotations_ZODCropped"
+    output_dir: str = "outputs/streaming_baseline"
+
+    # Dataset
+    target_category: int = 0
+    min_score: float = 0.5
+    subsample_steps: int = 1
+
+    # Model
+    backbone: str = "resnet50"
+    pretrained: bool = True
+    freeze_backbone: bool = True
+    dropout: float = 0.0
+    
+    # Load from pretrained offline baseline (optional)
+    load_checkpoint: Optional[str] = None
+
+    # Training
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    
+    # Class imbalance
+    pos_weight: str | float = "auto"
+
+    # Filtering policy
+    filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    tau_loss: float = 0.5
+    tau_teacher: float = 0.5
+    topk_window_size: int = 100
+    topk_k: int = 10
+
+    # Replay buffer
+    use_replay: bool = False
+    replay_capacity: int = 1000
+    replay_batch_size: int = 32
+    replay_admission_policy: Literal["fifo", "random", "reservoir"] = "fifo"
+    
+    # Store items that pass filter in replay buffer
+    store_filtered_items: bool = True
+
+    # Evaluation
+    eval_every_n_items: int = 1000
+    checkpoint_interval: int = 1000
+
+    # Reproducibility
+    seed: int = 42
+
+    # Device
+    device: str = "cuda"
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "Config":
+        """Load config from YAML file."""
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+# =============================================================================
+# Training utilities
+# =============================================================================
+
+def compute_pos_weight_from_streaming_dataset(dataset: StreamingDataset) -> float:
+    """Compute pos_weight from streaming dataset metadata."""
+    num_positive = 0
+    total = 0
+    for seq_meta in dataset.sequence_metadata:
+        frame_info = seq_meta["frame_info"]
+        for frame_idx in range(0, seq_meta["num_frames"], dataset.subsample_steps):
+            info = frame_info.get(frame_idx, {"has_target": False})
+            if info["has_target"]:
+                num_positive += 1
+            total += 1
+    
+    num_negative = total - num_positive
+    if num_positive == 0:
+        return 1.0
+    return num_negative / num_positive
+
+
+def create_filter_policy(config: Config) -> FilterPolicy:
+    """Create filter policy from config."""
+    if config.filter_policy == "none":
+        return NoFilterPolicy()
+    elif config.filter_policy == "difficulty":
+        return DifficultyBasedPolicy(
+            tau_loss=config.tau_loss,
+            tau_teacher=config.tau_teacher,
+            store_all=False,  # Only store items that pass filter
+        )
+    elif config.filter_policy == "topk":
+        return TopKPolicy(
+            window_size=config.topk_window_size,
+            k=config.topk_k,
+            tau_teacher=config.tau_teacher,
+        )
+    else:
+        raise ValueError(f"Unknown filter policy: {config.filter_policy}")
+
+
+def perform_update(
+    model: nn.Module,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    image: torch.Tensor,
+    target: torch.Tensor,
+    replay_batch: Optional[Dict[str, torch.Tensor]],
+    device: torch.device,
+) -> float:
+    """
+    Perform a single parameter update (backward pass).
+
+    If replay_batch is provided, mix current item with replay samples.
+
+    Returns:
+        Loss value.
+    """
+    model.train()
+    optimizer.zero_grad()
+
+    # Current item
+    image = image.unsqueeze(0).to(device)
+    target = target.unsqueeze(0).to(device)
+    
+    if replay_batch is not None:
+        # Mix with replay batch
+        images = torch.cat([image, replay_batch["image"]], dim=0)
+        targets = torch.cat([target, replay_batch["target"]], dim=0)
+    else:
+        images = image
+        targets = target
+
+    # Forward and backward
+    logits = model(images)
+    loss = criterion(logits, targets)
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
+
+
+# =============================================================================
+# Main streaming loop
+# =============================================================================
+
+def streaming_train(
+    model: nn.Module,
+    train_stream: StreamingDataset,
+    val_stream: StreamingDataset,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    filter_policy: FilterPolicy,
+    replay_buffer: Optional[ReplayBuffer],
+    metrics_logger: StreamingMetricsLogger,
+    device: torch.device,
+    config: Config,
+) -> None:
+    """
+    Main streaming training loop.
+
+    Processes train_stream in temporal order, applying filter policy and
+    optionally using replay. Periodically evaluates on val_stream.
+    """
+    print("\n" + "=" * 60)
+    print("Starting streaming training...")
+    print("=" * 60)
+
+    checkpoint_idx = 0
+    
+    # Create progress bar
+    pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
+
+    for stream_item in pbar:
+        # Select action using filter policy
+        action = filter_policy.select_action(stream_item, model, criterion, device)
+
+        # Log stream item processing
+        forward_pass = (action == "train") or (config.filter_policy != "none")
+        backward_pass = (action == "train")
+        metrics_logger.log_stream_item(action, forward_pass, backward_pass)
+
+        # Execute action
+        if action == "train":
+            # Sample replay batch if available
+            replay_batch = None
+            if replay_buffer is not None and len(replay_buffer) > 0:
+                replay_batch = replay_buffer.sample(config.replay_batch_size, device=str(device))
+
+            # Perform update
+            loss = perform_update(
+                model,
+                criterion,
+                optimizer,
+                stream_item.image,
+                torch.tensor(stream_item.target, dtype=torch.float32),
+                replay_batch,
+                device,
+            )
+
+            # Store in replay buffer after training
+            if replay_buffer is not None and config.store_filtered_items:
+                replay_buffer.add(stream_item.to_dict())
+
+        elif action == "store":
+            # Store without training
+            if replay_buffer is not None:
+                replay_buffer.add(stream_item.to_dict())
+
+        # Checkpoint and evaluation
+        if metrics_logger.should_checkpoint():
+            checkpoint_idx += 1
+
+            # Log checkpoint metrics
+            buffer_stats = replay_buffer.get_stats() if replay_buffer else None
+            filter_stats = filter_policy.get_stats()
+            metrics_logger.log_checkpoint(checkpoint_idx, buffer_stats, filter_stats)
+
+            # Evaluate on validation stream
+            if checkpoint_idx % (config.eval_every_n_items // config.checkpoint_interval) == 0:
+                eval_metrics = evaluate_streaming(model, val_stream, criterion, device)
+                metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
+
+                # Update progress bar
+                pbar.set_postfix({
+                    "val_f1": f"{eval_metrics['f1']:.3f}",
+                    "train_rate": f"{filter_stats.get('train_rate', 1.0):.3f}",
+                })
+
+    print("\n" + "=" * 60)
+    print("Streaming training complete!")
+    print("=" * 60)
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main(config: Config, config_path: Path, command: str) -> None:
+    """Run streaming baseline training."""
+
+    start_time = datetime.now()
+
+    print("=" * 60)
+    print("Streaming Baseline Training")
+    print("=" * 60)
+
+    # Setup
+    set_seed(config.seed)
+    device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    # Resolve paths and create run directory
+    annotations_dir = PROJECT_ROOT / config.annotations_dir
+    base_output_dir = PROJECT_ROOT / config.output_dir
+    run_dir = create_run_dir(base_output_dir)
+    print(f"Run directory: {run_dir}")
+
+    # Copy config file
+    shutil.copy(config_path, run_dir / "config.yaml")
+
+    # Transforms
+    train_transform, val_transform = get_default_transforms()
+
+    # Create streaming datasets
+    print("\nLoading streaming datasets...")
+    train_stream = StreamingDataset(
+        dataset_root=config.dataset_root,
+        annotations_dir=annotations_dir,
+        split="train",
+        transform=train_transform,
+        target_category=config.target_category,
+        min_score=config.min_score,
+        subsample_steps=config.subsample_steps,
+        verbose=True,
+    )
+
+    val_stream = StreamingDataset(
+        dataset_root=config.dataset_root,
+        annotations_dir=annotations_dir,
+        split="val",
+        transform=val_transform,
+        target_category=config.target_category,
+        min_score=config.min_score,
+        subsample_steps=config.subsample_steps,
+        verbose=True,
+    )
+
+    # Model
+    print("\nInitializing model...")
+    model = Classifier(
+        backbone=config.backbone,
+        pretrained=config.pretrained,
+        freeze_backbone=config.freeze_backbone,
+        dropout=config.dropout,
+    )
+    
+    # Load checkpoint if specified
+    if config.load_checkpoint:
+        checkpoint_path = PROJECT_ROOT / config.load_checkpoint
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+    
+    model = model.to(device)
+    print(model)
+
+    # Loss function
+    if config.pos_weight == "auto":
+        pos_weight_value = compute_pos_weight_from_streaming_dataset(train_stream)
+        print(f"\nAuto-computed pos_weight: {pos_weight_value:.2f}")
+    else:
+        pos_weight_value = float(config.pos_weight)
+
+    pos_weight_tensor = torch.tensor([pos_weight_value], device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+
+    # Optimizer
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+
+    # Filter policy
+    print("\nCreating filter policy...")
+    filter_policy = create_filter_policy(config)
+    print(f"  Policy: {config.filter_policy}")
+    if config.filter_policy == "difficulty":
+        print(f"  tau_loss: {config.tau_loss}, tau_teacher: {config.tau_teacher}")
+    elif config.filter_policy == "topk":
+        print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}, tau_teacher: {config.tau_teacher}")
+
+    # Replay buffer
+    replay_buffer = None
+    if config.use_replay:
+        print("\nCreating replay buffer...")
+        replay_buffer = ReplayBuffer(
+            capacity=config.replay_capacity,
+            admission_policy=config.replay_admission_policy,
+            device="cpu",  # Store on CPU to save GPU memory
+        )
+        print(f"  Capacity: {config.replay_capacity}")
+        print(f"  Admission policy: {config.replay_admission_policy}")
+        print(f"  Replay batch size: {config.replay_batch_size}")
+
+    # Metrics logger
+    metrics_logger = StreamingMetricsLogger(
+        log_dir=run_dir,
+        checkpoint_interval=config.checkpoint_interval,
+    )
+
+    # Save initial run info
+    dataset_info = {
+        "train_total": len(train_stream),
+        "val_total": len(val_stream),
+    }
+    save_run_info(
+        run_dir=run_dir,
+        config=config,
+        command=command,
+        start_time=start_time,
+        dataset_info=dataset_info,
+        repo_path=PROJECT_ROOT,
+    )
+
+    # Run streaming training
+    streaming_train(
+        model=model,
+        train_stream=train_stream,
+        val_stream=val_stream,
+        criterion=criterion,
+        optimizer=optimizer,
+        filter_policy=filter_policy,
+        replay_buffer=replay_buffer,
+        metrics_logger=metrics_logger,
+        device=device,
+        config=config,
+    )
+
+    # Final evaluation
+    print("\nFinal evaluation...")
+    final_metrics = evaluate_streaming(model, val_stream, criterion, device)
+    print(f"  Val Loss: {final_metrics['loss']:.4f}")
+    print(f"  Val Acc:  {final_metrics['accuracy']:.4f}")
+    print(f"  Val F1:   {final_metrics['f1']:.4f}")
+
+    # Print metrics summary
+    metrics_logger.print_summary()
+
+    # Save final model
+    final_path = run_dir / "final_model.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config.__dict__,
+            "final_metrics": final_metrics,
+        },
+        final_path,
+    )
+
+    # Save final run info
+    end_time = datetime.now()
+    save_run_info(
+        run_dir=run_dir,
+        config=config,
+        command=command,
+        start_time=start_time,
+        end_time=end_time,
+        best_metric=final_metrics["f1"],
+        best_metric_name="final_val_f1",
+        dataset_info=dataset_info,
+        repo_path=PROJECT_ROOT,
+    )
+
+    print(f"\nRun directory: {run_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Streaming baseline training")
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to config YAML file",
+    )
+    args = parser.parse_args()
+
+    config_path = PROJECT_ROOT / args.config
+    if not config_path.exists():
+        print(f"Config file not found: {config_path}")
+        sys.exit(1)
+
+    # Reconstruct command for logging
+    command = " ".join(sys.argv)
+
+    config = Config.from_yaml(config_path)
+    main(config, config_path, command)

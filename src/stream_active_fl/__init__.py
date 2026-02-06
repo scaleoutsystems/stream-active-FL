@@ -2,6 +2,24 @@
 
 __version__ = "0.1.0"
 
-from stream_active_fl import data, models, utils
+from stream_active_fl import (
+    core,
+    evaluation,
+    logging,
+    memory,
+    models,
+    policies,
+    training,
+    utils,
+)
 
-__all__ = ["data", "models", "utils"]
+__all__ = [
+    "core",
+    "evaluation",
+    "logging",
+    "memory",
+    "models",
+    "policies",
+    "training",
+    "utils",
+]

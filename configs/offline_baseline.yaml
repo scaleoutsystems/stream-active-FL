@@ -3,18 +3,18 @@
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
-annotations_dir: "data/annotations_ZODCropped"  # relative to project root
-output_dir: "outputs/offline_baseline"          # checkpoints and logs
+annotations_dir: "data/annotations_ZODCropped"   # relative to project root
+output_dir: "outputs/offline_baseline"           # checkpoints and logs
 
 # Dataset
-target_category: 2        # 0=person, 1=car, 2=traffic_light
+target_category: 0        # 0=person, 1=car, 2=traffic_light
 min_score: 0.5            # minimum detection score to count as positive
 subsample_steps: 5        # 1=all frames, 5=every 5th frame
 
 # Model
 backbone: "resnet50"
 pretrained: true
-freeze_backbone: true     # train only the classification head
+freeze_backbone: true     # train only classification head
 dropout: 0.0
 
 # Training
@@ -29,7 +29,7 @@ weight_decay: 1.0e-4
 pos_weight: "auto"
 
 # Evaluation
-eval_every_n_epochs: 1    # validate after every N epochs
+eval_every_n_epochs: 1    # validate every N epochs
 
 # Reproducibility
 seed: 42
