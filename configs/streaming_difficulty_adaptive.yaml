@@ -1,0 +1,52 @@
+# Streaming with adaptive difficulty-based filtering
+# Trains on the top 30% hardest items (by loss)
+
+# Paths
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
+annotations_dir: "data/annotations_ZODCropped"
+output_dir: "outputs/streaming_difficulty_adaptive"
+
+# Dataset
+target_category: 0        # 0=person, 1=car, 2=traffic_light
+min_score: 0.5
+subsample_steps: 5
+
+# Model
+backbone: "resnet50"
+pretrained: true
+freeze_backbone: true
+dropout: 0.0
+load_checkpoint: null
+
+# Training
+learning_rate: 1.0e-3
+weight_decay: 1.0e-4
+
+# Class imbalance
+pos_weight: "auto"
+
+# Filtering: adaptive difficulty-based
+filter_policy: "difficulty"
+adaptive: true
+train_fraction: 0.3       # Train on ~30% hardest items
+loss_window_size: 500     # Sliding window for loss percentile
+warmup_items: 200         # Train on all items during warmup
+tau_teacher: 0.0          # No teacher confidence gate (isolate loss filtering)
+store_skipped: false
+
+# Replay buffer
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 32
+replay_admission_policy: "reservoir"
+store_filtered_items: true
+
+# Evaluation
+eval_every_n_items: 5000
+checkpoint_interval: 1000
+
+# Reproducibility
+seed: 42
+
+# Device
+device: "cuda"

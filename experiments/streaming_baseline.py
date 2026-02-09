@@ -6,7 +6,7 @@ filtering and replay. This is the core streaming learning pipeline.
 
 Usage:
     python experiments/streaming_baseline.py --config configs/streaming_no_filter.yaml
-    python experiments/streaming_baseline.py --config configs/streaming_with_filter.yaml
+    python experiments/streaming_baseline.py --config configs/streaming_difficulty_adaptive.yaml
 """
 
 from __future__ import annotations
@@ -81,10 +81,19 @@ class Config:
 
     # Filtering policy
     filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    
+    # Difficulty-based policy parameters
+    adaptive: bool = True
+    train_fraction: float = 0.3
+    loss_window_size: int = 500
+    warmup_items: int = 200
     tau_loss: float = 0.5
-    tau_teacher: float = 0.5
+    tau_teacher: float = 0.0
+    store_skipped: bool = False
+    
+    # TopK policy parameters
     topk_window_size: int = 100
-    topk_k: int = 10
+    topk_k: int = 30
 
     # Replay buffer
     use_replay: bool = False
@@ -141,9 +150,13 @@ def create_filter_policy(config: Config) -> FilterPolicy:
         return NoFilterPolicy()
     elif config.filter_policy == "difficulty":
         return DifficultyBasedPolicy(
+            adaptive=config.adaptive,
+            train_fraction=config.train_fraction,
+            loss_window_size=config.loss_window_size,
+            warmup_items=config.warmup_items,
             tau_loss=config.tau_loss,
             tau_teacher=config.tau_teacher,
-            store_all=False,  # Only store items that pass filter
+            store_skipped=config.store_skipped,
         )
     elif config.filter_policy == "topk":
         return TopKPolicy(
@@ -383,9 +396,15 @@ def main(config: Config, config_path: Path, command: str) -> None:
     filter_policy = create_filter_policy(config)
     print(f"  Policy: {config.filter_policy}")
     if config.filter_policy == "difficulty":
-        print(f"  tau_loss: {config.tau_loss}, tau_teacher: {config.tau_teacher}")
+        if config.adaptive:
+            print(f"  Mode: adaptive (train_fraction={config.train_fraction})")
+            print(f"  Loss window: {config.loss_window_size}, warmup: {config.warmup_items}")
+        else:
+            print(f"  Mode: fixed (tau_loss={config.tau_loss})")
+        print(f"  Teacher gate: tau_teacher={config.tau_teacher}")
     elif config.filter_policy == "topk":
-        print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}, tau_teacher: {config.tau_teacher}")
+        print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}")
+        print(f"  Teacher gate: tau_teacher={config.tau_teacher}")
 
     # Replay buffer
     replay_buffer = None
