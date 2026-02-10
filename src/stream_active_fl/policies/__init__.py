@@ -6,8 +6,9 @@ be stored for replay (store), or be skipped entirely (skip).
 
 Available policies:
 - NoFilterPolicy: Train on every item (baseline)
-- DifficultyBasedPolicy: Train only on high-loss items with confident supervision
+- DifficultyBasedPolicy: Train only on high-loss items (adaptive or fixed threshold)
 - TopKPolicy: Train on top-K hardest items in sliding window
+- TeacherConfidenceGate: Wrapper that filters out uncertain positive pseudo-labels
 """
 
 from .filtering import (
@@ -16,6 +17,7 @@ from .filtering import (
     NoFilterPolicy,
     DifficultyBasedPolicy,
     TopKPolicy,
+    TeacherConfidenceGate,
 )
 
 __all__ = [
@@ -24,4 +26,5 @@ __all__ = [
     "NoFilterPolicy",
     "DifficultyBasedPolicy",
     "TopKPolicy",
+    "TeacherConfidenceGate",
 ]

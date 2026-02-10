@@ -1,10 +1,10 @@
-# Streaming baseline: no filtering, no replay
-# Pure single-pass streaming (lower bound)
+# Streaming with teacher confidence gate only (no difficulty filtering)
+# Tests whether removing uncertain positive pseudo-labels helps
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
 annotations_dir: "data/annotations_ZODCropped"
-output_dir: "outputs/streaming_no_filter_no_replay"
+output_dir: "outputs/streaming_teacher_gate"
 
 # Dataset
 target_category: 0        # 0=person, 1=car, 2=traffic_light
@@ -25,11 +25,17 @@ weight_decay: 1.0e-4
 # Class imbalance
 pos_weight: "auto"
 
-# Filtering
+# Filtering: no difficulty filter, but apply teacher confidence gate
 filter_policy: "none"
+tau_teacher: 0.7          # Skip positive items with confidence < 0.7
 
 # Replay buffer
-use_replay: false
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 32
+replay_admission_policy: "reservoir"
+replay_weight: 0.5            # equal weight for current item and replay
+store_filtered_items: true
 
 # Evaluation
 eval_every_n_items: 5000

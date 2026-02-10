@@ -1,10 +1,10 @@
-# Streaming with adaptive difficulty-based filtering
-# Trains on the top 30% hardest items (by loss)
+# Streaming with adaptive difficulty filter + teacher confidence gate
+# Tests the combined effect of both filtering mechanisms
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
 annotations_dir: "data/annotations_ZODCropped"
-output_dir: "outputs/streaming_difficulty_adaptive"
+output_dir: "outputs/streaming_difficulty_adaptive_teacher_gate"
 
 # Dataset
 target_category: 0        # 0=person, 1=car, 2=traffic_light
@@ -25,15 +25,16 @@ weight_decay: 1.0e-4
 # Class imbalance
 pos_weight: "auto"
 
-# Filtering: adaptive difficulty-based
+# Filtering: adaptive difficulty + teacher confidence gate
 filter_policy: "difficulty"
 adaptive: true
-train_fraction: 0.3       # Train on ~30% hardest items
-loss_window_size: 500     # Sliding window for loss percentile
-warmup_items: 200         # Train on all items during warmup
+train_fraction: 0.3
+loss_window_size: 500
+warmup_items: 200
 store_skipped: false
 
-# Teacher confidence gate: disabled (tau_teacher defaults to 0.0)
+# Teacher confidence gate (applied before difficulty filter)
+tau_teacher: 0.7          # Skip positive items with confidence < 0.7
 
 # Replay buffer
 use_replay: true

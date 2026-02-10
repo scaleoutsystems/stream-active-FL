@@ -165,11 +165,28 @@ class ReplayBuffer:
         self.total_seen = 0
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get buffer statistics."""
+        """Get buffer statistics, including class distribution."""
+        n = len(self.buffer)
+
+        # Count positives and negatives in buffer
+        n_positive = 0
+        if n > 0:
+            for item in self.buffer:
+                target = item["target"]
+                if isinstance(target, torch.Tensor):
+                    if target.item() == 1.0:
+                        n_positive += 1
+                elif target == 1.0:
+                    n_positive += 1
+        n_negative = n - n_positive
+
         return {
-            "size": len(self.buffer),
+            "size": n,
             "capacity": self.capacity,
-            "utilization": len(self.buffer) / self.capacity if self.capacity > 0 else 0.0,
+            "utilization": n / self.capacity if self.capacity > 0 else 0.0,
             "total_seen": self.total_seen,
             "admission_policy": self.admission_policy,
+            "n_positive": n_positive,
+            "n_negative": n_negative,
+            "positive_ratio": n_positive / n if n > 0 else 0.0,
         }

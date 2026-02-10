@@ -67,6 +67,9 @@ class StreamingMetricsLogger:
                 "items_per_second",
                 "buffer_size",
                 "buffer_utilization",
+                "buffer_n_positive",
+                "buffer_n_negative",
+                "buffer_positive_ratio",
             ])
 
     def _init_checkpoints_csv(self) -> None:
@@ -130,6 +133,9 @@ class StreamingMetricsLogger:
         # Extract buffer stats
         buffer_size = buffer_stats.get("size", 0) if buffer_stats else 0
         buffer_util = buffer_stats.get("utilization", 0.0) if buffer_stats else 0.0
+        buffer_n_pos = buffer_stats.get("n_positive", 0) if buffer_stats else 0
+        buffer_n_neg = buffer_stats.get("n_negative", 0) if buffer_stats else 0
+        buffer_pos_ratio = buffer_stats.get("positive_ratio", 0.0) if buffer_stats else 0.0
 
         # Write to CSV
         with open(self.metrics_file, "a", newline="") as f:
@@ -144,6 +150,9 @@ class StreamingMetricsLogger:
                 f"{items_per_sec:.2f}",
                 buffer_size,
                 f"{buffer_util:.4f}",
+                buffer_n_pos,
+                buffer_n_neg,
+                f"{buffer_pos_ratio:.4f}",
             ])
 
         self.last_checkpoint_time = time.time()

@@ -40,6 +40,7 @@ from stream_active_fl.policies import (
     DifficultyBasedPolicy,
     FilterPolicy,
     NoFilterPolicy,
+    TeacherConfidenceGate,
     TopKPolicy,
 )
 from stream_active_fl.utils import set_seed
@@ -82,13 +83,16 @@ class Config:
     # Filtering policy
     filter_policy: Literal["none", "difficulty", "topk"] = "none"
     
+    # Teacher confidence gate (applied before any filter policy)
+    tau_teacher: float = 0.0
+    store_gated: bool = False
+    
     # Difficulty-based policy parameters
     adaptive: bool = True
     train_fraction: float = 0.3
     loss_window_size: int = 500
     warmup_items: int = 200
     tau_loss: float = 0.5
-    tau_teacher: float = 0.0
     store_skipped: bool = False
     
     # TopK policy parameters
@@ -100,6 +104,7 @@ class Config:
     replay_capacity: int = 1000
     replay_batch_size: int = 32
     replay_admission_policy: Literal["fifo", "random", "reservoir"] = "fifo"
+    replay_weight: float = 0.5  # Weight for replay loss (current item gets 1 - replay_weight)
     
     # Store items that pass filter in replay buffer
     store_filtered_items: bool = True
@@ -145,27 +150,36 @@ def compute_pos_weight_from_streaming_dataset(dataset: StreamingDataset) -> floa
 
 
 def create_filter_policy(config: Config) -> FilterPolicy:
-    """Create filter policy from config."""
+    """Create filter policy from config, optionally wrapped with teacher gate."""
+    # Build the inner policy
     if config.filter_policy == "none":
-        return NoFilterPolicy()
+        policy = NoFilterPolicy()
     elif config.filter_policy == "difficulty":
-        return DifficultyBasedPolicy(
+        policy = DifficultyBasedPolicy(
             adaptive=config.adaptive,
             train_fraction=config.train_fraction,
             loss_window_size=config.loss_window_size,
             warmup_items=config.warmup_items,
             tau_loss=config.tau_loss,
-            tau_teacher=config.tau_teacher,
             store_skipped=config.store_skipped,
         )
     elif config.filter_policy == "topk":
-        return TopKPolicy(
+        policy = TopKPolicy(
             window_size=config.topk_window_size,
             k=config.topk_k,
-            tau_teacher=config.tau_teacher,
         )
     else:
         raise ValueError(f"Unknown filter policy: {config.filter_policy}")
+
+    # Optionally wrap with teacher confidence gate
+    if config.tau_teacher > 0.0:
+        policy = TeacherConfidenceGate(
+            inner_policy=policy,
+            tau_teacher=config.tau_teacher,
+            store_gated=config.store_gated,
+        )
+
+    return policy
 
 
 def perform_update(
@@ -176,33 +190,50 @@ def perform_update(
     target: torch.Tensor,
     replay_batch: Optional[Dict[str, torch.Tensor]],
     device: torch.device,
+    replay_weight: float = 0.5,
 ) -> float:
     """
     Perform a single parameter update (backward pass).
 
-    If replay_batch is provided, mix current item with replay samples.
+    Computes separate losses for the current item and replay batch, then
+    combines them with explicit weighting. This prevents the replay batch
+    (typically 32 samples) from drowning out the current item's gradient.
+
+    Args:
+        model: The model to update.
+        criterion: Loss function.
+        optimizer: Optimizer.
+        image: Current stream item image tensor.
+        target: Current stream item target tensor.
+        replay_batch: Optional dict with "image" and "target" tensors.
+        device: Device to run on.
+        replay_weight: Weight for replay loss. Current item loss gets
+            weight (1 - replay_weight). Default 0.5 gives equal weight.
 
     Returns:
-        Loss value.
+        Combined loss value.
     """
     model.train()
     optimizer.zero_grad()
 
-    # Current item
+    # Current item loss
     image = image.unsqueeze(0).to(device)
     target = target.unsqueeze(0).to(device)
-    
-    if replay_batch is not None:
-        # Mix with replay batch
-        images = torch.cat([image, replay_batch["image"]], dim=0)
-        targets = torch.cat([target, replay_batch["target"]], dim=0)
-    else:
-        images = image
-        targets = target
+    logits_current = model(image)
+    loss_current = criterion(logits_current, target)
 
-    # Forward and backward
-    logits = model(images)
-    loss = criterion(logits, targets)
+    if replay_batch is not None:
+        # Replay loss (computed separately)
+        replay_images = replay_batch["image"].to(device)
+        replay_targets = replay_batch["target"].to(device)
+        logits_replay = model(replay_images)
+        loss_replay = criterion(logits_replay, replay_targets)
+
+        # Weighted combination: equal voice for current item and replay
+        loss = (1.0 - replay_weight) * loss_current + replay_weight * loss_replay
+    else:
+        loss = loss_current
+
     loss.backward()
     optimizer.step()
 
@@ -265,6 +296,7 @@ def streaming_train(
                 torch.tensor(stream_item.target, dtype=torch.float32),
                 replay_batch,
                 device,
+                replay_weight=config.replay_weight,
             )
 
             # Store in replay buffer after training
@@ -401,10 +433,10 @@ def main(config: Config, config_path: Path, command: str) -> None:
             print(f"  Loss window: {config.loss_window_size}, warmup: {config.warmup_items}")
         else:
             print(f"  Mode: fixed (tau_loss={config.tau_loss})")
-        print(f"  Teacher gate: tau_teacher={config.tau_teacher}")
     elif config.filter_policy == "topk":
         print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}")
-        print(f"  Teacher gate: tau_teacher={config.tau_teacher}")
+    if config.tau_teacher > 0.0:
+        print(f"  Teacher confidence gate: tau_teacher={config.tau_teacher} (positive items only)")
 
     # Replay buffer
     replay_buffer = None
@@ -418,6 +450,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         print(f"  Capacity: {config.replay_capacity}")
         print(f"  Admission policy: {config.replay_admission_policy}")
         print(f"  Replay batch size: {config.replay_batch_size}")
+        print(f"  Replay weight: {config.replay_weight} (current item: {1.0 - config.replay_weight})")
 
     # Metrics logger
     metrics_logger = StreamingMetricsLogger(

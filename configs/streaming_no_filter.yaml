@@ -19,7 +19,7 @@ dropout: 0.0
 load_checkpoint: null     # optional path to pretrained checkpoint
 
 # Training
-learning_rate: 1.0e-3
+learning_rate: 3.0e-4
 weight_decay: 1.0e-4
 
 # Class imbalance
@@ -33,6 +33,7 @@ use_replay: true
 replay_capacity: 2000
 replay_batch_size: 32
 replay_admission_policy: "reservoir"    # fifo, random, or reservoir
+replay_weight: 0.5            # equal weight for current item and replay
 store_filtered_items: true
 
 # Evaluation

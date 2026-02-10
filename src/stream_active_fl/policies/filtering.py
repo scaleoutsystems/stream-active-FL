@@ -7,8 +7,11 @@ be stored for replay (store), or be skipped entirely.
 Available policies:
 - NoFilterPolicy: Train on every item (unfiltered baseline)
 - DifficultyBasedPolicy: Train on high-loss items, with optional adaptive
-  thresholding (percentile-based) and teacher confidence gating
+  thresholding (percentile-based)
 - TopKPolicy: Train on top-K hardest items in a sliding window
+
+All policies can be wrapped with TeacherConfidenceGate to additionally
+filter out positive items with low-confidence pseudo-labels.
 """
 
 from __future__ import annotations
@@ -78,6 +81,78 @@ def _compute_item_loss(
 
 
 # =============================================================================
+# TeacherConfidenceGate (general-purpose wrapper)
+# =============================================================================
+
+
+class TeacherConfidenceGate(FilterPolicy):
+    """
+    General-purpose wrapper that gates on teacher pseudo-label confidence.
+
+    Wraps any FilterPolicy and skips positive items whose teacher confidence
+    is below a threshold. This removes uncertain pseudo-labels from training.
+
+    Only positive items (target == 1) are gated, because negative items
+    (target == 0) have teacher_score == 0 by convention (no detection found),
+    which is actually a confident prediction — the teacher is confident
+    nothing is there.
+
+    Args:
+        inner_policy: The underlying filter policy to delegate to.
+        tau_teacher: Confidence threshold. Positive items with
+            teacher_score < tau_teacher are skipped.
+        store_gated: If True, gated items get action "store" instead of "skip".
+    """
+
+    def __init__(
+        self,
+        inner_policy: FilterPolicy,
+        tau_teacher: float = 0.5,
+        store_gated: bool = False,
+    ):
+        self.inner_policy = inner_policy
+        self.tau_teacher = tau_teacher
+        self.store_gated = store_gated
+
+        # Statistics for the gate itself
+        self.count_gated = 0
+        self.count_passed = 0
+
+    def select_action(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        criterion: nn.Module,
+        device: torch.device,
+    ) -> Action:
+        # Only gate positive items with low teacher confidence
+        if (
+            stream_item.target == 1.0
+            and stream_item.teacher_score < self.tau_teacher
+        ):
+            self.count_gated += 1
+            return "store" if self.store_gated else "skip"
+
+        # Otherwise, delegate to inner policy
+        self.count_passed += 1
+        return self.inner_policy.select_action(stream_item, model, criterion, device)
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self.count_gated + self.count_passed
+        inner_stats = self.inner_policy.get_stats()
+
+        gate_stats = {
+            "teacher_gate_tau": self.tau_teacher,
+            "teacher_gate_gated": self.count_gated,
+            "teacher_gate_passed": self.count_passed,
+            "teacher_gate_rate": self.count_gated / max(total, 1),
+        }
+
+        # Merge inner policy stats (inner stats take precedence for shared keys)
+        return {**gate_stats, **inner_stats}
+
+
+# =============================================================================
 # NoFilterPolicy
 # =============================================================================
 
@@ -103,7 +178,6 @@ class NoFilterPolicy(FilterPolicy):
         return "train"
 
     def get_stats(self) -> Dict[str, Any]:
-        total = self.count_train
         return {
             "count_train": self.count_train,
             "train_rate": 1.0,
@@ -129,9 +203,6 @@ class DifficultyBasedPolicy(FilterPolicy):
     **Fixed mode**: Uses absolute thresholds (tau_loss). Only useful when you
     know the loss scale well.
 
-    Optionally gates on teacher confidence (tau_teacher > 0) to exclude items
-    with low-quality pseudo-labels.
-
     Args:
         adaptive: If True, use percentile-based adaptive thresholding.
         train_fraction: Fraction of items to train on (only if adaptive=True).
@@ -139,11 +210,9 @@ class DifficultyBasedPolicy(FilterPolicy):
         loss_window_size: Size of the sliding window for loss history
             (only if adaptive=True).
         warmup_items: Number of items to process before applying the adaptive
-            threshold. During warmup, all items (that pass teacher gate) are
-            trained on. This builds up an initial loss distribution.
+            threshold. During warmup, all items are trained on to build up
+            an initial loss distribution.
         tau_loss: Absolute loss threshold (only if adaptive=False).
-        tau_teacher: Teacher confidence threshold. Items with teacher_score
-            below this are skipped. Set to 0.0 to disable.
         store_skipped: If True, skipped items are stored (action="store")
             instead of fully discarded.
     """
@@ -155,7 +224,6 @@ class DifficultyBasedPolicy(FilterPolicy):
         loss_window_size: int = 500,
         warmup_items: int = 200,
         tau_loss: float = 0.5,
-        tau_teacher: float = 0.0,
         store_skipped: bool = False,
     ):
         self.adaptive = adaptive
@@ -163,7 +231,6 @@ class DifficultyBasedPolicy(FilterPolicy):
         self.loss_window_size = loss_window_size
         self.warmup_items = warmup_items
         self.tau_loss = tau_loss
-        self.tau_teacher = tau_teacher
         self.store_skipped = store_skipped
 
         # Sliding window of recent losses (for adaptive mode)
@@ -201,15 +268,7 @@ class DifficultyBasedPolicy(FilterPolicy):
     ) -> Action:
         self.items_seen += 1
 
-        # Gate 1: Teacher confidence
-        if self.tau_teacher > 0.0 and stream_item.teacher_score < self.tau_teacher:
-            if self.store_skipped:
-                self.count_store += 1
-                return "store"
-            self.count_skip += 1
-            return "skip"
-
-        # Gate 2: Compute loss (requires forward pass)
+        # Compute loss (requires forward pass)
         loss_value = _compute_item_loss(stream_item, model, criterion, device)
         self.total_loss += loss_value
         self.loss_history.append(loss_value)
@@ -248,7 +307,6 @@ class DifficultyBasedPolicy(FilterPolicy):
             "avg_loss": avg_loss,
             "items_seen": self.items_seen,
             "adaptive": self.adaptive,
-            "tau_teacher": self.tau_teacher,
         }
 
         if self.adaptive:
@@ -277,18 +335,15 @@ class TopKPolicy(FilterPolicy):
     Args:
         window_size: Size of the sliding window.
         k: Number of items to train on per window.
-        tau_teacher: Teacher confidence threshold (0.0 to disable).
     """
 
     def __init__(
         self,
         window_size: int = 100,
         k: int = 30,
-        tau_teacher: float = 0.0,
     ):
         self.window_size = window_size
         self.k = k
-        self.tau_teacher = tau_teacher
 
         # Sliding window: stores only loss values (not full items)
         self.loss_window: deque = deque(maxlen=window_size)
@@ -306,11 +361,6 @@ class TopKPolicy(FilterPolicy):
         device: torch.device,
     ) -> Action:
         self.items_seen += 1
-
-        # Gate: Teacher confidence
-        if self.tau_teacher > 0.0 and stream_item.teacher_score < self.tau_teacher:
-            self.count_skip += 1
-            return "skip"
 
         # Compute loss
         loss_value = _compute_item_loss(stream_item, model, criterion, device)
@@ -343,5 +393,4 @@ class TopKPolicy(FilterPolicy):
             "items_seen": self.items_seen,
             "window_size": self.window_size,
             "k": self.k,
-            "tau_teacher": self.tau_teacher,
         }
