@@ -7,7 +7,7 @@ annotations_dir: "data/annotations_ZODCropped"
 output_dir: "outputs/streaming_no_filter_no_replay"
 
 # Dataset
-target_category: 0        # 0=person, 1=car, 2=traffic_light
+target_category: 0
 min_score: 0.5
 subsample_steps: 5
 

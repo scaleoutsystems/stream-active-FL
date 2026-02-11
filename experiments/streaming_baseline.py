@@ -105,9 +105,6 @@ class Config:
     replay_batch_size: int = 32
     replay_admission_policy: Literal["fifo", "random", "reservoir"] = "fifo"
     replay_weight: float = 0.5  # Weight for replay loss (current item gets 1 - replay_weight)
-    
-    # Store items that pass filter in replay buffer
-    store_filtered_items: bool = True
 
     # Evaluation
     eval_every_n_items: int = 1000
@@ -299,14 +296,12 @@ def streaming_train(
                 replay_weight=config.replay_weight,
             )
 
-            # Store in replay buffer after training
-            if replay_buffer is not None and config.store_filtered_items:
-                replay_buffer.add(stream_item.to_dict())
-
-        elif action == "store":
-            # Store without training
-            if replay_buffer is not None:
-                replay_buffer.add(stream_item.to_dict())
+        # Offer every item to the replay buffer (regardless of filter action)
+        # so the buffer stays representative of the full stream distribution.
+        # The buffer's admission policy (e.g. reservoir sampling) decides
+        # whether to actually store or reject each item.
+        if replay_buffer is not None:
+            replay_buffer.add(stream_item.to_dict())
 
         # Checkpoint and evaluation
         if metrics_logger.should_checkpoint():
@@ -317,8 +312,14 @@ def streaming_train(
             filter_stats = filter_policy.get_stats()
             metrics_logger.log_checkpoint(checkpoint_idx, buffer_stats, filter_stats)
 
+            # Log per-class filter selection stats (interval since last checkpoint)
+            selection_stats = filter_policy.get_selection_stats()
+            metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)
+            filter_policy.reset_selection_stats()
+
             # Evaluate on validation stream
-            if checkpoint_idx % (config.eval_every_n_items // config.checkpoint_interval) == 0:
+            eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
+            if checkpoint_idx % eval_interval == 0:
                 eval_metrics = evaluate_streaming(model, val_stream, criterion, device)
                 metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
 

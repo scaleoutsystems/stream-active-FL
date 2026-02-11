@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Dict, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -29,13 +30,132 @@ from ..core.items import StreamItem
 Action = Literal["train", "store", "skip"]
 
 
+# =============================================================================
+# Selection tracking
+# =============================================================================
+
+
+@dataclass
+class SelectionTracker:
+    """
+    Tracks per-class, per-action selection statistics over an interval.
+
+    Records what the filter selects (train/store/skip) broken down by
+    class (positive/negative) and loss values. Stats accumulate between
+    calls to reset_interval(), giving per-checkpoint-interval visibility.
+    """
+
+    # Counts: action × class
+    train_pos: int = 0
+    train_neg: int = 0
+    skip_pos: int = 0
+    skip_neg: int = 0
+    store_pos: int = 0
+    store_neg: int = 0
+
+    # Loss accumulators (for averages)
+    loss_sum_train_pos: float = 0.0
+    loss_sum_train_neg: float = 0.0
+    loss_sum_skip_pos: float = 0.0
+    loss_sum_skip_neg: float = 0.0
+
+    def record(self, action: Action, target: float, loss: Optional[float] = None) -> None:
+        """Record a single filter decision."""
+        is_pos = target == 1.0
+
+        if action == "train":
+            if is_pos:
+                self.train_pos += 1
+                if loss is not None:
+                    self.loss_sum_train_pos += loss
+            else:
+                self.train_neg += 1
+                if loss is not None:
+                    self.loss_sum_train_neg += loss
+        elif action == "skip":
+            if is_pos:
+                self.skip_pos += 1
+                if loss is not None:
+                    self.loss_sum_skip_pos += loss
+            else:
+                self.skip_neg += 1
+                if loss is not None:
+                    self.loss_sum_skip_neg += loss
+        elif action == "store":
+            if is_pos:
+                self.store_pos += 1
+            else:
+                self.store_neg += 1
+
+    def get_interval_stats(self) -> Dict[str, Any]:
+        """Return stats for the current interval."""
+        total_train = self.train_pos + self.train_neg
+        total_skip = self.skip_pos + self.skip_neg
+        total_store = self.store_pos + self.store_neg
+        total = total_train + total_skip + total_store
+        total_pos = self.train_pos + self.skip_pos + self.store_pos
+        total_neg = self.train_neg + self.skip_neg + self.store_neg
+
+        stats: Dict[str, Any] = {
+            # Per-action counts
+            "train_pos": self.train_pos,
+            "train_neg": self.train_neg,
+            "skip_pos": self.skip_pos,
+            "skip_neg": self.skip_neg,
+            "store_pos": self.store_pos,
+            "store_neg": self.store_neg,
+            # Rates
+            "train_total": total_train,
+            "skip_total": total_skip,
+            "interval_total": total,
+            # Class distribution of trained items
+            "train_pos_ratio": self.train_pos / max(total_train, 1),
+            # Selection rates by class
+            "pos_train_rate": self.train_pos / max(total_pos, 1),
+            "neg_train_rate": self.train_neg / max(total_neg, 1),
+            # Raw loss sums (for merging in wrappers)
+            "loss_sum_train_pos": self.loss_sum_train_pos,
+            "loss_sum_train_neg": self.loss_sum_train_neg,
+            "loss_sum_skip_pos": self.loss_sum_skip_pos,
+            "loss_sum_skip_neg": self.loss_sum_skip_neg,
+            # Average loss by action × class
+            "avg_loss_train_pos": self.loss_sum_train_pos / max(self.train_pos, 1),
+            "avg_loss_train_neg": self.loss_sum_train_neg / max(self.train_neg, 1),
+            "avg_loss_skip_pos": self.loss_sum_skip_pos / max(self.skip_pos, 1),
+            "avg_loss_skip_neg": self.loss_sum_skip_neg / max(self.skip_neg, 1),
+        }
+        return stats
+
+    def reset_interval(self) -> None:
+        """Reset counters for a new interval."""
+        self.train_pos = 0
+        self.train_neg = 0
+        self.skip_pos = 0
+        self.skip_neg = 0
+        self.store_pos = 0
+        self.store_neg = 0
+        self.loss_sum_train_pos = 0.0
+        self.loss_sum_train_neg = 0.0
+        self.loss_sum_skip_pos = 0.0
+        self.loss_sum_skip_neg = 0.0
+
+
+# =============================================================================
+# Base class
+# =============================================================================
+
+
 class FilterPolicy(ABC):
     """
     Base class for filter policies.
 
     A policy examines a stream item and the current model state to decide
-    whether to train, store, or skip.
+    whether to train, store, or skip. All policies include a SelectionTracker
+    for per-class logging.
     """
+
+    def __init__(self):
+        self.selection_tracker = SelectionTracker()
 
     @abstractmethod
     def select_action(
@@ -62,6 +182,14 @@ class FilterPolicy(ABC):
     def get_stats(self) -> Dict[str, Any]:
         """Return policy statistics (for logging)."""
         return {}
+
+    def get_selection_stats(self) -> Dict[str, Any]:
+        """Return per-class selection stats for the current interval."""
+        return self.selection_tracker.get_interval_stats()
+
+    def reset_selection_stats(self) -> None:
+        """Reset interval selection stats (call after each checkpoint)."""
+        self.selection_tracker.reset_interval()
 
 
 def _compute_item_loss(
@@ -110,6 +238,7 @@ class TeacherConfidenceGate(FilterPolicy):
         tau_teacher: float = 0.5,
         store_gated: bool = False,
     ):
+        super().__init__()
         self.inner_policy = inner_policy
         self.tau_teacher = tau_teacher
         self.store_gated = store_gated
@@ -131,7 +260,9 @@ class TeacherConfidenceGate(FilterPolicy):
             and stream_item.teacher_score < self.tau_teacher
         ):
             self.count_gated += 1
-            return "store" if self.store_gated else "skip"
+            action = "store" if self.store_gated else "skip"
+            self.selection_tracker.record(action, stream_item.target)
+            return action
 
         # Otherwise, delegate to inner policy
         self.count_passed += 1
@@ -151,6 +282,46 @@ class TeacherConfidenceGate(FilterPolicy):
         # Merge inner policy stats (inner stats take precedence for shared keys)
         return {**gate_stats, **inner_stats}
 
+    def get_selection_stats(self) -> Dict[str, Any]:
+        """Merge gate's own tracking with inner policy's tracking."""
+        gate_stats = self.selection_tracker.get_interval_stats()
+        inner_stats = self.inner_policy.get_selection_stats()
+
+        # Sum the two trackers (gate handles items it rejects, inner handles the rest)
+        merged: Dict[str, Any] = {}
+        for key in gate_stats:
+            if isinstance(gate_stats[key], (int, float)):
+                merged[key] = gate_stats[key] + inner_stats.get(key, 0)
+            else:
+                merged[key] = gate_stats[key]
+
+        # Recompute derived rates from merged counts
+        total_train = merged.get("train_pos", 0) + merged.get("train_neg", 0)
+        total_skip = merged.get("skip_pos", 0) + merged.get("skip_neg", 0)
+        total = total_train + total_skip + merged.get("store_pos", 0) + merged.get("store_neg", 0)
+        total_pos = merged.get("train_pos", 0) + merged.get("skip_pos", 0) + merged.get("store_pos", 0)
+        total_neg = merged.get("train_neg", 0) + merged.get("skip_neg", 0) + merged.get("store_neg", 0)
+
+        merged["train_total"] = total_train
+        merged["skip_total"] = total_skip
+        merged["interval_total"] = total
+        merged["train_pos_ratio"] = merged.get("train_pos", 0) / max(total_train, 1)
+        merged["pos_train_rate"] = merged.get("train_pos", 0) / max(total_pos, 1)
+        merged["neg_train_rate"] = merged.get("train_neg", 0) / max(total_neg, 1)
+
+        # Recompute avg losses from merged sums/counts
+        merged["avg_loss_train_pos"] = merged.get("loss_sum_train_pos", 0) / max(merged.get("train_pos", 0), 1)
+        merged["avg_loss_train_neg"] = merged.get("loss_sum_train_neg", 0) / max(merged.get("train_neg", 0), 1)
+        merged["avg_loss_skip_pos"] = merged.get("loss_sum_skip_pos", 0) / max(merged.get("skip_pos", 0), 1)
+        merged["avg_loss_skip_neg"] = merged.get("loss_sum_skip_neg", 0) / max(merged.get("skip_neg", 0), 1)
+
+        return merged
+
+    def reset_selection_stats(self) -> None:
+        """Reset both gate and inner policy trackers."""
+        self.selection_tracker.reset_interval()
+        self.inner_policy.reset_selection_stats()
+
 
 # =============================================================================
 # NoFilterPolicy
@@ -165,6 +336,7 @@ class NoFilterPolicy(FilterPolicy):
     """
 
     def __init__(self):
+        super().__init__()
         self.count_train = 0
 
     def select_action(
@@ -175,6 +347,7 @@ class NoFilterPolicy(FilterPolicy):
         device: torch.device,
     ) -> Action:
         self.count_train += 1
+        self.selection_tracker.record("train", stream_item.target)
         return "train"
 
     def get_stats(self) -> Dict[str, Any]:
@@ -226,6 +399,7 @@ class DifficultyBasedPolicy(FilterPolicy):
         tau_loss: float = 0.5,
         store_skipped: bool = False,
     ):
+        super().__init__()
         self.adaptive = adaptive
         self.train_fraction = train_fraction
         self.loss_window_size = loss_window_size
@@ -276,6 +450,7 @@ class DifficultyBasedPolicy(FilterPolicy):
         # During warmup, train on everything (to build loss distribution)
         if self.adaptive and self.items_seen <= self.warmup_items:
             self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
             return "train"
 
         # Determine threshold
@@ -287,12 +462,15 @@ class DifficultyBasedPolicy(FilterPolicy):
         # Decide action
         if loss_value > threshold:
             self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
             return "train"
         else:
             if self.store_skipped:
                 self.count_store += 1
+                self.selection_tracker.record("store", stream_item.target, loss_value)
                 return "store"
             self.count_skip += 1
+            self.selection_tracker.record("skip", stream_item.target, loss_value)
             return "skip"
 
     def get_stats(self) -> Dict[str, Any]:
@@ -342,6 +520,7 @@ class TopKPolicy(FilterPolicy):
         window_size: int = 100,
         k: int = 30,
     ):
+        super().__init__()
         self.window_size = window_size
         self.k = k
 
@@ -371,6 +550,7 @@ class TopKPolicy(FilterPolicy):
         # During initial fill, train on everything
         if len(self.loss_window) < self.window_size:
             self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
             return "train"
 
         # Check if current loss is >= the K-th highest loss in window
@@ -379,9 +559,11 @@ class TopKPolicy(FilterPolicy):
 
         if loss_value >= kth_loss:
             self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
             return "train"
         else:
             self.count_skip += 1
+            self.selection_tracker.record("skip", stream_item.target, loss_value)
             return "skip"
 
     def get_stats(self) -> Dict[str, Any]:

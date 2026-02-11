@@ -7,7 +7,7 @@ annotations_dir: "data/annotations_ZODCropped"
 output_dir: "outputs/streaming_difficulty_adaptive_teacher_gate"
 
 # Dataset
-target_category: 0        # 0=person, 1=car, 2=traffic_light
+target_category: 0
 min_score: 0.5
 subsample_steps: 5
 
@@ -25,24 +25,21 @@ weight_decay: 1.0e-4
 # Class imbalance
 pos_weight: "auto"
 
-# Filtering: adaptive difficulty + teacher confidence gate
+# Filtering
 filter_policy: "difficulty"
 adaptive: true
 train_fraction: 0.3
 loss_window_size: 500
 warmup_items: 200
 store_skipped: false
-
-# Teacher confidence gate (applied before difficulty filter)
-tau_teacher: 0.7          # Skip positive items with confidence < 0.7
+tau_teacher: 0.7
 
 # Replay buffer
 use_replay: true
 replay_capacity: 2000
 replay_batch_size: 32
 replay_admission_policy: "reservoir"
-replay_weight: 0.5            # equal weight for current item and replay
-store_filtered_items: true
+replay_weight: 0.5
 
 # Evaluation
 eval_every_n_items: 5000

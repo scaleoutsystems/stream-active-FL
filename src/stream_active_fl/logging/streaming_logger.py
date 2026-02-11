@@ -41,6 +41,7 @@ class StreamingMetricsLogger:
         # CSV files
         self.metrics_file = self.log_dir / "streaming_metrics.csv"
         self.checkpoints_file = self.log_dir / "checkpoints.csv"
+        self.filter_stats_file = self.log_dir / "filter_stats.csv"
 
         # Counters
         self.num_items_processed = 0
@@ -52,6 +53,7 @@ class StreamingMetricsLogger:
         # Initialize CSV files
         self._init_metrics_csv()
         self._init_checkpoints_csv()
+        self._init_filter_stats_csv()
 
     def _init_metrics_csv(self) -> None:
         """Initialize main metrics CSV with headers."""
@@ -70,6 +72,29 @@ class StreamingMetricsLogger:
                 "buffer_n_positive",
                 "buffer_n_negative",
                 "buffer_positive_ratio",
+            ])
+
+    def _init_filter_stats_csv(self) -> None:
+        """Initialize filter selection stats CSV with headers."""
+        with open(self.filter_stats_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "checkpoint_idx",
+                "items_processed",
+                "train_pos",
+                "train_neg",
+                "skip_pos",
+                "skip_neg",
+                "store_pos",
+                "store_neg",
+                "train_total",
+                "train_pos_ratio",
+                "pos_train_rate",
+                "neg_train_rate",
+                "avg_loss_train_pos",
+                "avg_loss_train_neg",
+                "avg_loss_skip_pos",
+                "avg_loss_skip_neg",
             ])
 
     def _init_checkpoints_csv(self) -> None:
@@ -156,6 +181,39 @@ class StreamingMetricsLogger:
             ])
 
         self.last_checkpoint_time = time.time()
+
+    def log_filter_stats(
+        self,
+        checkpoint_idx: int,
+        selection_stats: Dict[str, Any],
+    ) -> None:
+        """
+        Log per-class filter selection stats for the current interval.
+
+        Args:
+            checkpoint_idx: Checkpoint index.
+            selection_stats: Dict from FilterPolicy.get_selection_stats().
+        """
+        with open(self.filter_stats_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                checkpoint_idx,
+                self.num_items_processed,
+                selection_stats.get("train_pos", 0),
+                selection_stats.get("train_neg", 0),
+                selection_stats.get("skip_pos", 0),
+                selection_stats.get("skip_neg", 0),
+                selection_stats.get("store_pos", 0),
+                selection_stats.get("store_neg", 0),
+                selection_stats.get("train_total", 0),
+                f"{selection_stats.get('train_pos_ratio', 0.0):.4f}",
+                f"{selection_stats.get('pos_train_rate', 0.0):.4f}",
+                f"{selection_stats.get('neg_train_rate', 0.0):.4f}",
+                f"{selection_stats.get('avg_loss_train_pos', 0.0):.4f}",
+                f"{selection_stats.get('avg_loss_train_neg', 0.0):.4f}",
+                f"{selection_stats.get('avg_loss_skip_pos', 0.0):.4f}",
+                f"{selection_stats.get('avg_loss_skip_neg', 0.0):.4f}",
+            ])
 
     def log_evaluation(
         self,
