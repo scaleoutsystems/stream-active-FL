@@ -15,6 +15,7 @@ from .datasets import (
     StreamingDataset,
     collate_drop_none,
     get_default_transforms,
+    get_detection_transforms,
 )
 from .items import StreamItem
 
@@ -26,4 +27,5 @@ __all__ = [
     "StreamItem",
     "collate_drop_none",
     "get_default_transforms",
+    "get_detection_transforms",
 ]

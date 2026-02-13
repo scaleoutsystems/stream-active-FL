@@ -60,7 +60,8 @@ class ReplayBuffer:
         Add an item to the replay buffer.
 
         Args:
-            item: Dictionary with keys "image", "target", "teacher_score", "metadata".
+            item: Dictionary with keys "image", "target", "teacher_score", "metadata",
+                  and optionally "annotations" (for detection tasks).
                   Images should be tensors.
 
         Returns:
@@ -75,6 +76,13 @@ class ReplayBuffer:
             "teacher_score": item["teacher_score"],
             "metadata": item["metadata"].copy() if isinstance(item["metadata"], dict) else item["metadata"],
         }
+
+        # Store detection annotations if present
+        if "annotations" in item and item["annotations"] is not None:
+            item_copy["annotations"] = {
+                "boxes": item["annotations"]["boxes"].to(self.device),
+                "labels": item["annotations"]["labels"].to(self.device),
+            }
 
         if self.admission_policy == "fifo":
             self.buffer.append(item_copy)
@@ -107,7 +115,7 @@ class ReplayBuffer:
         else:
             raise ValueError(f"Unknown admission policy: {self.admission_policy}")
 
-    def sample(self, batch_size: int, device: Optional[str] = None) -> Optional[Dict[str, torch.Tensor]]:
+    def sample(self, batch_size: int, device: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Sample a batch from the replay buffer.
 
@@ -116,8 +124,9 @@ class ReplayBuffer:
             device: Device to move sampled batch to (defaults to buffer device).
 
         Returns:
-            Batched dict with "image", "target", "teacher_score" tensors,
-            or None if buffer is empty or batch_size > buffer size.
+            For classification: Batched dict with "image", "target", "teacher_score" tensors.
+            For detection: Dict with "images" (list of tensors) and "targets" (list of dicts).
+            Returns None if buffer is empty.
         """
         if len(self.buffer) == 0:
             return None
@@ -136,6 +145,21 @@ class ReplayBuffer:
         # Stack into batched tensors
         target_device = device if device is not None else self.device
 
+        # Detection mode: items have variable-length annotations, return lists
+        has_annotations = len(items) > 0 and "annotations" in items[0]
+        if has_annotations:
+            return {
+                "images": [item["image"].to(target_device) for item in items],
+                "targets": [
+                    {
+                        "boxes": item["annotations"]["boxes"].to(target_device),
+                        "labels": item["annotations"]["labels"].to(target_device),
+                    }
+                    for item in items
+                ],
+            }
+
+        # Classification mode: stack into batched tensors (original behavior)
         batch = {
             "image": torch.stack([item["image"] for item in items]).to(target_device),
             "target": torch.stack([item["target"] for item in items]).to(target_device),

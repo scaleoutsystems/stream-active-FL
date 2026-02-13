@@ -192,13 +192,49 @@ class FilterPolicy(ABC):
         self.selection_tracker.reset_interval()
 
 
+def _compute_detection_item_loss(
+    stream_item: StreamItem,
+    model: nn.Module,
+    device: torch.device,
+) -> float:
+    """
+    Compute detection loss for a single stream item (forward pass only, no grad).
+
+    torchvision detection models must be in train() mode to return losses,
+    so we temporarily switch mode and restore it after.
+    """
+    was_training = model.training
+    model.train()  # torchvision detection models need train mode for losses
+    with torch.no_grad():
+        image = stream_item.image.to(device)
+        target = {
+            "boxes": stream_item.annotations["boxes"].to(device),
+            "labels": stream_item.annotations["labels"].to(device),
+        }
+        loss_dict = model([image], [target])
+        loss = sum(loss_dict.values())
+    if not was_training:
+        model.eval()
+    return loss.item()
+
+
 def _compute_item_loss(
     stream_item: StreamItem,
     model: nn.Module,
     criterion: nn.Module,
     device: torch.device,
 ) -> float:
-    """Compute loss for a single stream item (forward pass only, no grad)."""
+    """
+    Compute loss for a single stream item (forward pass only, no grad).
+
+    Dispatches to detection or classification path based on whether the
+    stream item carries detection annotations.
+    """
+    # Detection path: model computes its own loss
+    if stream_item.annotations is not None:
+        return _compute_detection_item_loss(stream_item, model, device)
+
+    # Classification path (original)
     model.eval()
     with torch.no_grad():
         image = stream_item.image.unsqueeze(0).to(device)

@@ -37,6 +37,64 @@ CATEGORY_NAME_TO_ID: Dict[str, int] = {v: k for k, v in CATEGORY_ID_TO_NAME.item
 
 
 # =============================================================================
+# Shared annotation helpers
+# =============================================================================
+
+def load_classification_frame_info(
+    ann_path: Path,
+    target_category: int,
+    min_score: float,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Load annotation JSON and extract per-frame info for a single category.
+
+    Used by both ZODFrameDataset and StreamingDataset (classification mode)
+    to determine per-frame binary targets and max teacher scores.
+
+    Args:
+        ann_path: Path to per-sequence annotation JSON.
+        target_category: Category ID to treat as the positive class.
+        min_score: Minimum detection score to count as a valid detection.
+
+    Returns:
+        Dict mapping frame_idx -> {
+            "has_target": bool,
+            "max_score": float (max detection score, 0 if none),
+        }
+    """
+    result: Dict[int, Dict[str, Any]] = {}
+
+    if not ann_path.exists():
+        return result
+
+    try:
+        with ann_path.open("r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Warning: could not read {ann_path}: {e}")
+        return result
+
+    # Group detections by frame_idx
+    frame_detections: Dict[int, List[float]] = defaultdict(list)
+    for ann in data.get("annotations", []):
+        if ann.get("category_id") != target_category:
+            continue
+        score = float(ann.get("score", 1.0))
+        if score < min_score:
+            continue
+        frame_detections[ann["frame_idx"]].append(score)
+
+    # Build result dict
+    for frame_idx, scores in frame_detections.items():
+        result[frame_idx] = {
+            "has_target": True,
+            "max_score": max(scores),
+        }
+
+    return result
+
+
+# =============================================================================
 # Default image transforms
 # =============================================================================
 
@@ -44,7 +102,7 @@ def get_default_transforms(
     image_size: Tuple[int, int] = (224, 224),
 ) -> Tuple[transforms.Compose, transforms.Compose]:
     """
-    Returns (train_transform, val_transform).
+    Returns (train_transform, val_transform) for classification.
     
     Both transforms are deterministic (no augmentation).
     """
@@ -66,6 +124,20 @@ def get_default_transforms(
     ])
 
     return train_transform, val_transform
+
+
+def get_detection_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
+    """
+    Returns (train_transform, val_transform) for detection.
+
+    Detection models (e.g. FCOS) handle normalization and resizing internally
+    via GeneralizedRCNNTransform, so we only convert PIL images to float
+    tensors in [0, 1] range.
+    """
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+    return transform, transform
 
 
 # =============================================================================
@@ -167,48 +239,9 @@ class ZODFrameDataset(Dataset):
         if verbose:
             self._print_summary()
 
-    def _load_frame_info(
-        self, ann_path: Path
-    ) -> Dict[int, Dict[str, Any]]:
-        """
-        Load annotation JSON and extract per-frame info for the target category.
-
-        Returns:
-            Dict mapping frame_idx -> {
-                "has_target": bool,
-                "max_score": float (max detection score, 0 if none),
-            }
-        """
-        result: Dict[int, Dict[str, Any]] = {}
-
-        if not ann_path.exists():
-            return result
-
-        try:
-            with ann_path.open("r") as f:
-                data = json.load(f)
-        except Exception as e:
-            print(f"Warning: could not read {ann_path}: {e}")
-            return result
-
-        # Group detections by frame_idx
-        frame_detections: Dict[int, List[float]] = defaultdict(list)
-        for ann in data.get("annotations", []):
-            if ann.get("category_id") != self.target_category:
-                continue
-            score = float(ann.get("score", 1.0))
-            if score < self.min_score:
-                continue
-            frame_detections[ann["frame_idx"]].append(score)
-
-        # Build result dict
-        for frame_idx, scores in frame_detections.items():
-            result[frame_idx] = {
-                "has_target": True,
-                "max_score": max(scores),
-            }
-
-        return result
+    def _load_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
+        """Load per-frame classification info (delegates to module-level helper)."""
+        return load_classification_frame_info(ann_path, self.target_category, self.min_score)
 
     def _print_summary(self) -> None:
         """Print dataset statistics."""
@@ -290,6 +323,10 @@ class StreamingDataset:
     this dataset is designed for streaming: sequences are processed strictly in temporal order,
     and the learner decides for each frame whether to train, store, or skip.
 
+    Supports two tasks:
+    - "classification": Binary classification (has target category or not). Default.
+    - "detection": 2D object detection (all categories, with bounding boxes).
+
     Args:
         dataset_root: Path to ZOD dataset (original or ZODCropped).
         annotations_dir: Path to directory with per-sequence annotation JSONs.
@@ -297,8 +334,10 @@ class StreamingDataset:
         split: "train" or "val". Unlike offline training, we don't mix splits.
         transform: Torchvision transform to apply to images.
         target_category: Category ID (0=person, 1=car, 2=traffic_light).
+            Only used for classification task. Ignored for detection.
         min_score: Minimum detection score to count as a valid detection.
         subsample_steps: Use every Nth frame (1 = all frames).
+        task: "classification" for binary labels, "detection" for bounding boxes.
         verbose: Print dataset statistics.
 
     Usage:
@@ -320,6 +359,7 @@ class StreamingDataset:
         target_category: int = 0,
         min_score: float = 0.0,
         subsample_steps: int = 1,
+        task: Literal["classification", "detection"] = "classification",
         verbose: bool = True,
     ):
         self.dataset_root = Path(dataset_root)
@@ -330,6 +370,7 @@ class StreamingDataset:
         self.target_category = target_category
         self.min_score = min_score
         self.subsample_steps = subsample_steps
+        self.task = task
 
         # Load ZOD sequences
         zod_sequences = ZodSequences(str(self.dataset_root), version)
@@ -350,9 +391,12 @@ class StreamingDataset:
             seq_id = sequence.info.id
             frames = sequence.info.get_camera_frames()
 
-            # Load annotations
+            # Load annotations (task-dependent)
             ann_path = self.annotations_dir / f"{seq_id}.json"
-            frame_info = self._load_frame_info(ann_path)
+            if self.task == "detection":
+                frame_info = self._load_detection_frame_info(ann_path)
+            else:
+                frame_info = self._load_frame_info(ann_path)
 
             # Count subsampled frames
             num_frames = len(range(0, len(frames), self.subsample_steps))
@@ -371,7 +415,20 @@ class StreamingDataset:
             self._print_summary()
 
     def _load_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
-        """Load per-frame annotation info for target category."""
+        """Load per-frame classification info (delegates to module-level helper)."""
+        return load_classification_frame_info(ann_path, self.target_category, self.min_score)
+
+    def _load_detection_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
+        """
+        Load per-frame detection annotations (all categories).
+
+        Returns:
+            Dict mapping frame_idx -> {
+                "has_target": bool,
+                "max_score": float,
+                "annotations": list of {"bbox": [x,y,w,h], "category_id": int, "score": float},
+            }
+        """
         result: Dict[int, Dict[str, Any]] = {}
 
         if not ann_path.exists():
@@ -384,37 +441,75 @@ class StreamingDataset:
             print(f"Warning: could not read {ann_path}: {e}")
             return result
 
-        # Group detections by frame_idx
-        frame_detections: Dict[int, List[float]] = defaultdict(list)
+        # Group annotations by frame_idx (all categories, filtered by min_score)
+        frame_annotations: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for ann in data.get("annotations", []):
-            if ann.get("category_id") != self.target_category:
-                continue
             score = float(ann.get("score", 1.0))
             if score < self.min_score:
                 continue
-            frame_detections[ann["frame_idx"]].append(score)
+            frame_annotations[ann["frame_idx"]].append({
+                "bbox": ann["bbox"],  # [x, y, w, h]
+                "category_id": ann["category_id"],
+                "score": score,
+            })
 
         # Build result dict
-        for frame_idx, scores in frame_detections.items():
+        for frame_idx, anns in frame_annotations.items():
+            scores = [a["score"] for a in anns]
             result[frame_idx] = {
                 "has_target": True,
                 "max_score": max(scores),
+                "annotations": anns,
             }
 
         return result
 
+    @staticmethod
+    def _format_detection_annotations(
+        raw_anns: List[Dict[str, Any]],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Convert raw annotation list to torchvision-format detection target.
+
+        Converts bboxes from [x, y, w, h] to [x1, y1, x2, y2] and shifts
+        category IDs by +1 (torchvision reserves 0 for background).
+
+        Returns:
+            {"boxes": FloatTensor[N, 4], "labels": Int64Tensor[N]}
+        """
+        if not raw_anns:
+            return {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "labels": torch.zeros((0,), dtype=torch.int64),
+            }
+
+        boxes = []
+        labels = []
+        for ann in raw_anns:
+            x, y, w, h = ann["bbox"]
+            # [x, y, w, h] -> [x1, y1, x2, y2]
+            boxes.append([x, y, x + w, y + h])
+            # Shift by 1: annotation category_id 0,1,2 -> model label 1,2,3
+            labels.append(ann["category_id"] + 1)
+
+        return {
+            "boxes": torch.tensor(boxes, dtype=torch.float32),
+            "labels": torch.tensor(labels, dtype=torch.int64),
+        }
+
     def _print_summary(self) -> None:
         """Print streaming dataset statistics."""
-        cat_name = CATEGORY_ID_TO_NAME.get(self.target_category, str(self.target_category))
-
-        # Count positive frames
         num_positive = 0
+        total_annotations = 0
+
         for seq_meta in self.sequence_metadata:
             frame_info = seq_meta["frame_info"]
             for frame_idx in range(0, seq_meta["num_frames"], self.subsample_steps):
                 info = frame_info.get(frame_idx, {"has_target": False})
                 if info["has_target"]:
                     num_positive += 1
+                if self.task == "detection":
+                    total_annotations += len(info.get("annotations", []))
 
         num_negative = self.total_frames - num_positive
 
@@ -425,14 +520,26 @@ class StreamingDataset:
         print(f"  Dataset root     : {self.dataset_root}")
         print(f"  Annotations dir  : {self.annotations_dir}")
         print(f"  Split            : {self.split}")
-        print(f"  Target category  : {self.target_category} ({cat_name})")
+        print(f"  Task             : {self.task}")
+        if self.task == "classification":
+            cat_name = CATEGORY_ID_TO_NAME.get(self.target_category, str(self.target_category))
+            print(f"  Target category  : {self.target_category} ({cat_name})")
+        else:
+            cats = ", ".join(f"{v} ({k})" for k, v in CATEGORY_ID_TO_NAME.items())
+            print(f"  Categories       : {cats}")
         print(f"  Min score filter : {self.min_score}")
         print(f"  Subsample steps  : {self.subsample_steps}")
         print("-" * 60)
         print(f"  Total sequences  : {len(self.sequence_metadata)}")
         print(f"  Total frames     : {self.total_frames}")
-        print(f"  Positive frames  : {num_positive} ({100 * num_positive / max(self.total_frames, 1):.1f}%)")
-        print(f"  Negative frames  : {num_negative} ({100 * num_negative / max(self.total_frames, 1):.1f}%)")
+        if self.task == "detection":
+            print(f"  Frames with objects : {num_positive} ({100 * num_positive / max(self.total_frames, 1):.1f}%)")
+            print(f"  Empty frames       : {num_negative} ({100 * num_negative / max(self.total_frames, 1):.1f}%)")
+            print(f"  Total annotations  : {total_annotations}")
+            print(f"  Avg objects/frame  : {total_annotations / max(self.total_frames, 1):.1f}")
+        else:
+            print(f"  Positive frames  : {num_positive} ({100 * num_positive / max(self.total_frames, 1):.1f}%)")
+            print(f"  Negative frames  : {num_negative} ({100 * num_negative / max(self.total_frames, 1):.1f}%)")
         print(f"  Stream order     : temporal (sequence-by-sequence)")
         print("=" * 60)
         print()
@@ -446,7 +553,8 @@ class StreamingDataset:
         Iterate over stream items in strict temporal order.
 
         Yields:
-            StreamItem with image, target, teacher_score, and metadata.
+            StreamItem with image, target, teacher_score, metadata,
+            and annotations (for detection task).
         """
         global_idx = 0
 
@@ -478,6 +586,12 @@ class StreamingDataset:
                 if self.transform is not None:
                     img = self.transform(img)
 
+                # Build detection annotations if in detection mode
+                annotations = None
+                if self.task == "detection":
+                    raw_anns = info.get("annotations", [])
+                    annotations = self._format_detection_annotations(raw_anns)
+
                 # Create stream item
                 metadata = {
                     "global_idx": global_idx,
@@ -491,6 +605,7 @@ class StreamingDataset:
                     target=target,
                     teacher_score=teacher_score,
                     metadata=metadata,
+                    annotations=annotations,
                 )
 
                 global_idx += 1
@@ -530,6 +645,12 @@ class StreamingDataset:
             if self.transform is not None:
                 img = self.transform(img)
 
+            # Build detection annotations if in detection mode
+            annotations = None
+            if self.task == "detection":
+                raw_anns = info.get("annotations", [])
+                annotations = self._format_detection_annotations(raw_anns)
+
             metadata = {
                 "seq_idx": seq_idx,
                 "seq_id": seq_id,
@@ -541,6 +662,7 @@ class StreamingDataset:
                 target=target,
                 teacher_score=teacher_score,
                 metadata=metadata,
+                annotations=annotations,
             )
 
 

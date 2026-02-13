@@ -51,8 +51,8 @@ class Config:
     """Experiment configuration."""
 
     # Paths
-    dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZODCropped"
-    annotations_dir: str = "data/annotations_ZODCropped"
+    dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
+    annotations_dir: str = "data/annotations_512x288"
     output_dir: str = "outputs/offline_baseline"
 
     # Dataset

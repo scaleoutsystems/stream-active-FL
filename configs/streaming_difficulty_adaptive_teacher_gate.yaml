@@ -2,8 +2,8 @@
 # Tests the combined effect of both filtering mechanisms
 
 # Paths
-dataset_root: "/mnt/pr_2018_scaleout_workdir/ZODCropped"
-annotations_dir: "data/annotations_ZODCropped"
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
+annotations_dir: "data/annotations_512x288"
 output_dir: "outputs/streaming_difficulty_adaptive_teacher_gate"
 
 # Dataset

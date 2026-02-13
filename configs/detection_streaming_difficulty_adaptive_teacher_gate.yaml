@@ -1,29 +1,26 @@
-# Streaming with adaptive difficulty-based filtering
-# Trains on the top 30% hardest items (by loss)
+# Streaming detection with adaptive difficulty filter + teacher confidence gate
+# Tests the combined effect of both filtering mechanisms
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
 annotations_dir: "data/annotations_512x288"
-output_dir: "outputs/streaming_difficulty_adaptive"
+output_dir: "outputs/detection_streaming_difficulty_adaptive_teacher_gate"
 
 # Dataset
-target_category: 0
 min_score: 0.5
 subsample_steps: 5
 
 # Model
-backbone: "resnet50"
-pretrained: true
-freeze_backbone: true
-dropout: 0.0
+num_classes: 4
+trainable_backbone_layers: 0
+image_min_size: 288
+image_max_size: 512
+pretrained_backbone: true
 load_checkpoint: null
 
 # Training
-learning_rate: 3.0e-4
+learning_rate: 1.0e-4
 weight_decay: 1.0e-4
-
-# Class imbalance
-pos_weight: "auto"
 
 # Filtering
 filter_policy: "difficulty"
@@ -32,17 +29,19 @@ train_fraction: 0.3
 loss_window_size: 500
 warmup_items: 200
 store_skipped: false
+tau_teacher: 0.5
 
 # Replay buffer
 use_replay: true
 replay_capacity: 2000
-replay_batch_size: 32
+replay_batch_size: 16
 replay_admission_policy: "reservoir"
 replay_weight: 0.5
 
 # Evaluation
 eval_every_n_items: 5000
 checkpoint_interval: 1000
+score_threshold: 0.3
 
 # Reproducibility
 seed: 42

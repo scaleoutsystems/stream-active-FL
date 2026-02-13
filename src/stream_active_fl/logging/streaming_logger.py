@@ -26,17 +26,20 @@ class StreamingMetricsLogger:
     Args:
         log_dir: Directory to save CSV logs.
         checkpoint_interval: How often to log checkpoints (in stream items processed).
+        task: "classification" or "detection". Controls checkpoint CSV columns.
     """
 
     def __init__(
         self,
         log_dir: str | Path,
         checkpoint_interval: int = 1000,
+        task: str = "classification",
     ):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         self.checkpoint_interval = checkpoint_interval
+        self.task = task
 
         # CSV files
         self.metrics_file = self.log_dir / "streaming_metrics.csv"
@@ -101,16 +104,29 @@ class StreamingMetricsLogger:
         """Initialize checkpoints CSV with headers (for evaluation metrics)."""
         with open(self.checkpoints_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "checkpoint_idx",
-                "items_processed",
-                "eval_loss",
-                "eval_accuracy",
-                "eval_precision",
-                "eval_recall",
-                "eval_f1",
-                "elapsed_seconds",
-            ])
+            if self.task == "detection":
+                writer.writerow([
+                    "checkpoint_idx",
+                    "items_processed",
+                    "eval_mAP",
+                    "eval_mAP_50",
+                    "eval_mAP_75",
+                    "eval_AP_person",
+                    "eval_AP_car",
+                    "eval_AP_traffic_light",
+                    "elapsed_seconds",
+                ])
+            else:
+                writer.writerow([
+                    "checkpoint_idx",
+                    "items_processed",
+                    "eval_loss",
+                    "eval_accuracy",
+                    "eval_precision",
+                    "eval_recall",
+                    "eval_f1",
+                    "elapsed_seconds",
+                ])
 
     def log_stream_item(
         self,
@@ -225,22 +241,37 @@ class StreamingMetricsLogger:
 
         Args:
             checkpoint_idx: Checkpoint index.
-            eval_metrics: Dict with loss, accuracy, precision, recall, f1.
+            eval_metrics: For classification: dict with loss, accuracy, precision, recall, f1.
+                          For detection: dict with mAP, mAP_50, mAP_75,
+                              AP_person, AP_car, AP_traffic_light.
         """
         elapsed = time.time() - self.start_time
 
         with open(self.checkpoints_file, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                checkpoint_idx,
-                self.num_items_processed,
-                f"{eval_metrics.get('loss', 0.0):.4f}",
-                f"{eval_metrics.get('accuracy', 0.0):.4f}",
-                f"{eval_metrics.get('precision', 0.0):.4f}",
-                f"{eval_metrics.get('recall', 0.0):.4f}",
-                f"{eval_metrics.get('f1', 0.0):.4f}",
-                f"{elapsed:.2f}",
-            ])
+            if self.task == "detection":
+                writer.writerow([
+                    checkpoint_idx,
+                    self.num_items_processed,
+                    f"{eval_metrics.get('mAP', 0.0):.4f}",
+                    f"{eval_metrics.get('mAP_50', 0.0):.4f}",
+                    f"{eval_metrics.get('mAP_75', 0.0):.4f}",
+                    f"{eval_metrics.get('AP_person', 0.0):.4f}",
+                    f"{eval_metrics.get('AP_car', 0.0):.4f}",
+                    f"{eval_metrics.get('AP_traffic_light', 0.0):.4f}",
+                    f"{elapsed:.2f}",
+                ])
+            else:
+                writer.writerow([
+                    checkpoint_idx,
+                    self.num_items_processed,
+                    f"{eval_metrics.get('loss', 0.0):.4f}",
+                    f"{eval_metrics.get('accuracy', 0.0):.4f}",
+                    f"{eval_metrics.get('precision', 0.0):.4f}",
+                    f"{eval_metrics.get('recall', 0.0):.4f}",
+                    f"{eval_metrics.get('f1', 0.0):.4f}",
+                    f"{elapsed:.2f}",
+                ])
 
     def should_checkpoint(self) -> bool:
         """Check if it's time to log a checkpoint."""
