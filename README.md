@@ -1,10 +1,32 @@
 # stream-active-FL
 
-This repository contains experimental code for a master thesis investigating client-side filtering strategies for continuous learning from streaming perception data in a federated setting. The core idea is to decide—for each incoming stream item—whether to train, store for replay, or skip, based on model-driven selection criteria.
+Experimental code for a master thesis on **client-side filtering** for continuous learning from streaming perception data in a federated setting. For each incoming stream item, the system decides whether to train, store for replay, or skip, using model-driven selection criteria.
+
+## Quick start
+
+From the repo root:
+
+```bash
+# Offline baseline (upper bound)
+python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+
+# Streaming with replay
+python experiments/streaming_baseline.py --config configs/streaming_no_filter.yaml
+```
+
+Detection experiments use `experiments/streaming_detection.py` and `configs/detection_*.yaml`.
+
+## Install
+
+Dependencies are in `pyproject.toml`. From the repo root:
+
+```bash
+pip install -e .
+```
 
 ## Status
 
-The codebase is under development.
+Early experimental. Codebase and configs are under active development.
 
 ## License
 
