@@ -44,8 +44,8 @@ class StreamingDetector(nn.Module):
         self,
         num_classes: int = 4,
         trainable_backbone_layers: int = 0,
-        image_min_size: int = 288,
-        image_max_size: int = 512,
+        image_min_size: int = 360,
+        image_max_size: int = 640,
         pretrained_backbone: bool = True,
     ):
         super().__init__()
@@ -103,7 +103,7 @@ class StreamingDetector(nn.Module):
             f"  backbone=resnet50_fpn,\n"
             f"  num_classes={self.num_classes},\n"
             f"  trainable_backbone_layers={self._trainable_backbone_layers},\n"
-            f"  image_size={self.image_min_size}x{self.image_max_size},\n"
+            f"  image_size={self.image_max_size}x{self.image_min_size} (WxH),\n"
             f"  trainable_params={trainable:,} / {total:,} "
             f"({100 * trainable / total:.1f}%)\n"
             f")"

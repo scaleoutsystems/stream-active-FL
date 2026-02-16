@@ -2,8 +2,8 @@
 # Full dataset, shuffled, multi-epoch training
 
 # Paths
-dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
-annotations_dir: "data/annotations_512x288"       # relative to project root
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+annotations_dir: "data/annotations_640x360"       # relative to project root
 output_dir: "outputs/offline_baseline"           # checkpoints and logs
 
 # Dataset

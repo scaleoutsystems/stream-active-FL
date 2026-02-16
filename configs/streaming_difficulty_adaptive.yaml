@@ -2,8 +2,8 @@
 # Trains on the top 30% hardest items (by loss)
 
 # Paths
-dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
-annotations_dir: "data/annotations_512x288"
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+annotations_dir: "data/annotations_640x360"
 output_dir: "outputs/streaming_difficulty_adaptive"
 
 # Dataset

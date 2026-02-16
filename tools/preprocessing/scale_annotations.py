@@ -2,7 +2,7 @@
 Step 4: Scale annotations from crop resolution to training resolution.
 
 Reads annotations generated at the crop resolution (2840x1600) and scales
-bounding boxes to the target training resolution (512x288).
+bounding boxes to the target training resolution (from config, e.g. 640x360).
 
 Usage:
     python tools/preprocessing/scale_annotations.py [--dry-run]

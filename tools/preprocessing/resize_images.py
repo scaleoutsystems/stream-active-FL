@@ -2,7 +2,7 @@
 Step 3: Resize cropped images to training resolution.
 
 Resizes the cropped 2840x1600 images to the target training resolution
-(default 512x288). Saves to RESIZED_DIR on the shared mount.
+(default 640x360 from config). Saves to RESIZED_DIR on the shared mount.
 
 Only processes the sequences/ subdirectory. Top-level metadata JSONs are
 copied separately. Already-existing files are skipped (safe to resume).

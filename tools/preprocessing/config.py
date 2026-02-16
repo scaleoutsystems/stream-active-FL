@@ -28,13 +28,9 @@ RESIZES_DIR = MOUNT_ROOT / "ZOD256"
 # Cropped images (intermediate — needed for teacher, can be deleted after)
 CROPPED_DIR = RESIZES_DIR / "ZODCropped_2840x1600"
 
-# Final training images (resized from cropped)
-RESIZED_DIR = RESIZES_DIR / "ZOD_512x288"
-
-# Project-local annotation directories
+# Project-local annotation directories (cropped is fixed)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ANNOTATIONS_CROPPED_DIR = PROJECT_ROOT / "data" / "annotations_cropped_2840x1600"
-ANNOTATIONS_RESIZED_DIR = PROJECT_ROOT / "data" / "annotations_512x288"
 
 # =============================================================================
 # Crop parameters
@@ -56,11 +52,14 @@ CROP_HEIGHT = CROP_PARAMS["height"]  # 1600
 # =============================================================================
 # Resize parameters
 # =============================================================================
+RESIZE_WIDTH = 640
+RESIZE_HEIGHT = 360
 
-# Target training resolution — 16:9, both dims multiples of 32
-RESIZE_WIDTH = 512
-RESIZE_HEIGHT = 288
 RESIZE_TARGET = (RESIZE_WIDTH, RESIZE_HEIGHT)  # (width, height) for PIL
+
+# Resized images and annotations (paths include resolution so multiple sizes coexist)
+RESIZED_DIR = RESIZES_DIR / f"ZOD_{RESIZE_WIDTH}x{RESIZE_HEIGHT}"
+ANNOTATIONS_RESIZED_DIR = PROJECT_ROOT / "data" / f"annotations_{RESIZE_WIDTH}x{RESIZE_HEIGHT}"
 
 # =============================================================================
 # Teacher model

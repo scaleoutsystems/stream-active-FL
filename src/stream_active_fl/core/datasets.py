@@ -152,7 +152,7 @@ class ZODFrameDataset(Dataset):
     contains at least one detection of `target_category` (with score >= min_score).
 
     Args:
-        dataset_root: Path to ZOD dataset (original or ZODCropped).
+        dataset_root: Path to ZOD dataset (e.g. ZOD256/ZOD_640x360 or ZODCropped_2840x1600).
         annotations_dir: Path to directory with per-sequence annotation JSONs.
         version: ZOD version, "full" or "mini".
         split: "train", "val", or None (use all sequences).
@@ -328,7 +328,7 @@ class StreamingDataset:
     - "detection": 2D object detection (all categories, with bounding boxes).
 
     Args:
-        dataset_root: Path to ZOD dataset (original or ZODCropped).
+        dataset_root: Path to ZOD dataset (e.g. ZOD256/ZOD_640x360 or ZODCropped_2840x1600).
         annotations_dir: Path to directory with per-sequence annotation JSONs.
         version: ZOD version, "full" or "mini".
         split: "train" or "val". Unlike offline training, we don't mix splits.

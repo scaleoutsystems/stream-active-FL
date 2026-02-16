@@ -54,8 +54,8 @@ class DetectionConfig:
     """Streaming detection experiment configuration."""
 
     # Paths
-    dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_512x288"
-    annotations_dir: str = "data/annotations_512x288"
+    dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+    annotations_dir: str = "data/annotations_640x360"
     output_dir: str = "outputs/detection_streaming_no_filter"
 
     # Dataset
@@ -65,8 +65,8 @@ class DetectionConfig:
     # Model
     num_classes: int = 4  # 3 categories (person, car, traffic_light) + background
     trainable_backbone_layers: int = 0
-    image_min_size: int = 288
-    image_max_size: int = 512
+    image_min_size: int = 360
+    image_max_size: int = 640
     pretrained_backbone: bool = True
 
     # Load from checkpoint (optional)
