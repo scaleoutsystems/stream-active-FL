@@ -3,7 +3,7 @@ Logging and experiment tracking utilities.
 
 Tools for reproducibility and metrics tracking:
 - Experiment tracking: Git info, run directories, environment info
-- MetricsLogger: Epoch-based CSV logging for offline training
+- OfflineMetricsLogger: Epoch-based CSV logging for offline training
 - StreamingMetricsLogger: Item-based CSV logging for streaming training
 """
 
@@ -13,7 +13,7 @@ from .experiment import (
     create_run_dir,
     save_run_info,
 )
-from .offline_logger import MetricsLogger
+from .offline_logger import OfflineMetricsLogger
 from .streaming_logger import StreamingMetricsLogger
 
 __all__ = [
@@ -21,6 +21,6 @@ __all__ = [
     "get_environment_info",
     "create_run_dir",
     "save_run_info",
-    "MetricsLogger",
+    "OfflineMetricsLogger",
     "StreamingMetricsLogger",
 ]

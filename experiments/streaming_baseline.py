@@ -32,7 +32,7 @@ warnings.filterwarnings("ignore", message="Can't initialize NVML")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from stream_active_fl.core import StreamingDataset, get_classification_transforms
-from stream_active_fl.evaluation import evaluate_streaming
+from stream_active_fl.evaluation import evaluate_streaming_classification
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
 from stream_active_fl.models import Classifier
@@ -346,7 +346,7 @@ def streaming_train(
             # Evaluate on validation stream
             eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
             if checkpoint_idx % eval_interval == 0:
-                eval_metrics = evaluate_streaming(model, val_stream, criterion, device)
+                eval_metrics = evaluate_streaming_classification(model, val_stream, criterion, device)
                 metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
 
                 # Update progress bar
@@ -525,7 +525,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
 
     # Final evaluation
     print("\nFinal evaluation...")
-    final_metrics = evaluate_streaming(model, val_stream, criterion, device)
+    final_metrics = evaluate_streaming_classification(model, val_stream, criterion, device)
     print(f"  Val Loss: {final_metrics['loss']:.4f}")
     print(f"  Val Acc:  {final_metrics['accuracy']:.4f}")
     print(f"  Val F1:   {final_metrics['f1']:.4f}")

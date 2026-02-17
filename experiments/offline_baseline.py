@@ -36,8 +36,8 @@ from stream_active_fl.core import (
     classification_collate,
     get_classification_transforms,
 )
-from stream_active_fl.evaluation import compute_metrics, evaluate_offline
-from stream_active_fl.logging import MetricsLogger, create_run_dir, save_run_info
+from stream_active_fl.evaluation import compute_classification_metrics, evaluate_offline_classification
+from stream_active_fl.logging import OfflineMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.models import Classifier
 from stream_active_fl.utils import set_seed, worker_init_fn
 
@@ -154,7 +154,7 @@ def train_one_epoch(
     # Compute epoch metrics
     all_preds = torch.cat(all_preds)
     all_targets = torch.cat(all_targets)
-    metrics = compute_metrics(all_preds, all_targets)
+    metrics = compute_classification_metrics(all_preds, all_targets)
     metrics["loss"] = total_loss / max(num_batches, 1)
 
     return metrics
@@ -237,7 +237,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
     )
 
     # Initialize metrics logger
-    metrics_logger = MetricsLogger(run_dir)
+    metrics_logger = OfflineMetricsLogger(run_dir)
 
     # Data loaders
     train_loader = DataLoader(
@@ -319,7 +319,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         # Validate
         val_metrics = None
         if epoch % config.eval_every_n_epochs == 0:
-            val_metrics = evaluate_offline(
+            val_metrics = evaluate_offline_classification(
                 model, val_loader, criterion, device, desc=f"Epoch {epoch} [Val]"
             )
             history["val"].append(val_metrics)

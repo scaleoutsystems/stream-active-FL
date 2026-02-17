@@ -20,14 +20,13 @@ import torch
 import torch.nn as nn
 from torchvision.ops import box_iou
 
-from ..core import StreamingDataset
+from ..core import CATEGORY_ID_TO_NAME, StreamingDataset
 
 
-# Category labels used by the model (shifted by +1 from annotation IDs)
+# Category labels used by the model (shifted by +1 from annotation IDs;
+# torchvision reserves label 0 for background).
 DETECTION_LABEL_TO_NAME: Dict[int, str] = {
-    1: "person",
-    2: "car",
-    3: "traffic_light",
+    k + 1: v for k, v in CATEGORY_ID_TO_NAME.items()
 }
 
 # Standard COCO IoU thresholds: 0.50, 0.55, 0.60, ..., 0.95
@@ -183,16 +182,16 @@ def _compute_per_class_ap(
         Dict mapping class label -> AP value.
     """
     # Collect all unique class labels from ground truth
-    all_gt_labels: set = set()
+    gt_classes: set = set()
     for labels in gt_labels_list:
-        all_gt_labels.update(labels.tolist())
+        gt_classes.update(labels.tolist())
 
-    if not all_gt_labels:
+    if not gt_classes:
         return {}
 
     per_class_ap: Dict[int, float] = {}
 
-    for cls in sorted(all_gt_labels):
+    for cls in sorted(gt_classes):
         # Gather all predictions and GTs for this class across all images
         all_scores: List[float] = []
         all_tp: List[int] = []

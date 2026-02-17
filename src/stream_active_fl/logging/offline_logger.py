@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-class MetricsLogger:
+class OfflineMetricsLogger:
     """
     Logger for saving training metrics to CSV.
 
