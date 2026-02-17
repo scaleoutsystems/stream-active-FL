@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore", message="Can't initialize NVML")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from stream_active_fl.core import StreamingDataset, get_detection_transforms
+from stream_active_fl.core import StreamingDataset, get_detection_augmentation, get_detection_transforms
 from stream_active_fl.core.items import StreamItem
 from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
@@ -75,6 +75,13 @@ class DetectionConfig:
     # Training
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
+    max_grad_norm: float = 0.0
+    accumulation_steps: int = 1
+
+    # Augmentation
+    augment: bool = False
+    hflip_prob: float = 0.5
+    color_jitter: bool = True
 
     # Filtering policy
     filter_policy: Literal["none", "difficulty", "topk"] = "none"
@@ -158,14 +165,18 @@ def create_filter_policy(config: DetectionConfig) -> FilterPolicy:
 
 def perform_detection_update(
     model: nn.Module,
-    optimizer: torch.optim.Optimizer,
     stream_item: StreamItem,
     replay_batch: Optional[Dict[str, Any]],
     device: torch.device,
     replay_weight: float = 0.5,
+    accumulation_steps: int = 1,
 ) -> float:
     """
-    Perform a single detection parameter update.
+    Compute detection loss and accumulate gradients (backward pass only).
+
+    The caller is responsible for optimizer.zero_grad(), gradient clipping,
+    and optimizer.step(). This separation enables gradient accumulation
+    across multiple stream items.
 
     The detection model computes its own loss internally (classification +
     bbox regression + centerness). Current item and replay batch get
@@ -173,17 +184,18 @@ def perform_detection_update(
 
     Args:
         model: Detection model (StreamingDetector).
-        optimizer: Optimizer.
         stream_item: Current stream item with annotations.
         replay_batch: Optional dict with "images" and "targets" lists.
         device: Device to run on.
         replay_weight: Weight for replay loss. Current gets (1 - replay_weight).
+        accumulation_steps: Number of items over which gradients are accumulated.
+            Loss is divided by this value so accumulated gradient magnitude
+            matches a single-step update.
 
     Returns:
-        Combined loss value.
+        Unscaled combined loss value (for logging).
     """
     model.train()
-    optimizer.zero_grad()
 
     # Current item loss
     image = stream_item.image.to(device)
@@ -208,8 +220,8 @@ def perform_detection_update(
     else:
         loss = loss_current
 
-    loss.backward()
-    optimizer.step()
+    # Scale loss for gradient accumulation and backward
+    (loss / accumulation_steps).backward()
 
     return loss.item()
 
@@ -237,13 +249,20 @@ def streaming_detection_train(
     """
     print("\n" + "=" * 60)
     print("Starting streaming detection training...")
+    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
+    print(f"  Accumulation steps: {config.accumulation_steps}")
     print("=" * 60)
 
     checkpoint_idx = 0
+    accumulation_steps = config.accumulation_steps
+    train_count = 0  # train items since last optimizer step
 
     # criterion=None for detection (model computes its own loss)
     # but filter policies require it in their signature
     criterion = None
+
+    # Initialize gradient state for accumulation
+    optimizer.zero_grad()
 
     pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
 
@@ -265,15 +284,27 @@ def streaming_detection_train(
                     config.replay_batch_size, device=str(device)
                 )
 
-            # Perform detection update
+            # Compute loss and accumulate gradients
             loss = perform_detection_update(
                 model,
-                optimizer,
                 stream_item,
                 replay_batch,
                 device,
                 replay_weight=config.replay_weight,
+                accumulation_steps=accumulation_steps,
             )
+
+            train_count += 1
+
+            # Step optimizer after accumulating enough gradients
+            if train_count % accumulation_steps == 0:
+                if config.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        config.max_grad_norm,
+                    )
+                optimizer.step()
+                optimizer.zero_grad()
 
         # Offer every item to the replay buffer
         if replay_buffer is not None:
@@ -310,6 +341,16 @@ def streaming_detection_train(
                     "train_rate": f"{filter_stats.get('train_rate', 1.0):.3f}",
                 })
 
+    # Flush any remaining accumulated gradients
+    if train_count % accumulation_steps != 0:
+        if config.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                config.max_grad_norm,
+            )
+        optimizer.step()
+        optimizer.zero_grad()
+
     print("\n" + "=" * 60)
     print("Streaming detection training complete!")
     print("=" * 60)
@@ -345,6 +386,15 @@ def main(config: DetectionConfig, config_path: Path, command: str) -> None:
     # Detection transforms (just ToTensor, model handles normalization)
     train_transform, val_transform = get_detection_transforms()
 
+    # Augmentation for training (applied before ToTensor)
+    train_augmentation = None
+    if config.augment:
+        train_augmentation = get_detection_augmentation(
+            hflip_prob=config.hflip_prob,
+            color_jitter=config.color_jitter,
+        )
+        print(f"\nAugmentation: hflip_prob={config.hflip_prob}, color_jitter={config.color_jitter}")
+
     # Create streaming datasets in detection mode
     print("\nLoading streaming datasets (detection mode)...")
     train_stream = StreamingDataset(
@@ -355,6 +405,7 @@ def main(config: DetectionConfig, config_path: Path, command: str) -> None:
         min_score=config.min_score,
         subsample_steps=config.subsample_steps,
         task="detection",
+        augmentation=train_augmentation,
         verbose=True,
     )
 
@@ -410,6 +461,12 @@ def main(config: DetectionConfig, config_path: Path, command: str) -> None:
         print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}")
     if config.tau_teacher > 0.0:
         print(f"  Teacher confidence gate: tau_teacher={config.tau_teacher}")
+
+    # Training settings
+    print(f"\nTraining settings:")
+    print(f"  Learning rate: {config.learning_rate}")
+    print(f"  Max grad norm: {config.max_grad_norm}")
+    print(f"  Accumulation steps: {config.accumulation_steps}")
 
     # Replay buffer
     replay_buffer = None

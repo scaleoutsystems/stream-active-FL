@@ -21,6 +21,13 @@ load_checkpoint: null
 # Training
 learning_rate: 1.0e-4
 weight_decay: 1.0e-4
+max_grad_norm: 1.0
+accumulation_steps: 1
+
+# Augmentation
+augment: true
+hflip_prob: 0.5
+color_jitter: true
 
 # Filtering
 filter_policy: "none"

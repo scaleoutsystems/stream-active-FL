@@ -31,7 +31,7 @@ warnings.filterwarnings("ignore", message="Can't initialize NVML")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from stream_active_fl.core import StreamingDataset, get_default_transforms
+from stream_active_fl.core import StreamingDataset, get_classification_transforms
 from stream_active_fl.evaluation import evaluate_streaming
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
@@ -76,7 +76,9 @@ class Config:
     # Training
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
-    
+    max_grad_norm: float = 0.0
+    accumulation_steps: int = 1
+
     # Class imbalance
     pos_weight: str | float = "auto"
 
@@ -182,15 +184,19 @@ def create_filter_policy(config: Config) -> FilterPolicy:
 def perform_update(
     model: nn.Module,
     criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
     image: torch.Tensor,
     target: torch.Tensor,
     replay_batch: Optional[Dict[str, torch.Tensor]],
     device: torch.device,
     replay_weight: float = 0.5,
+    accumulation_steps: int = 1,
 ) -> float:
     """
-    Perform a single parameter update (backward pass).
+    Compute loss and accumulate gradients (backward pass only).
+
+    The caller is responsible for optimizer.zero_grad(), gradient clipping,
+    and optimizer.step(). This separation enables gradient accumulation
+    across multiple stream items.
 
     Computes separate losses for the current item and replay batch, then
     combines them with explicit weighting. This prevents the replay batch
@@ -199,19 +205,20 @@ def perform_update(
     Args:
         model: The model to update.
         criterion: Loss function.
-        optimizer: Optimizer.
         image: Current stream item image tensor.
         target: Current stream item target tensor.
         replay_batch: Optional dict with "image" and "target" tensors.
         device: Device to run on.
         replay_weight: Weight for replay loss. Current item loss gets
             weight (1 - replay_weight). Default 0.5 gives equal weight.
+        accumulation_steps: Number of items over which gradients are accumulated.
+            Loss is divided by this value so accumulated gradient magnitude
+            matches a single-step update.
 
     Returns:
-        Combined loss value.
+        Unscaled combined loss value (for logging).
     """
     model.train()
-    optimizer.zero_grad()
 
     # Current item loss
     image = image.unsqueeze(0).to(device)
@@ -231,8 +238,8 @@ def perform_update(
     else:
         loss = loss_current
 
-    loss.backward()
-    optimizer.step()
+    # Scale loss for gradient accumulation and backward
+    (loss / accumulation_steps).backward()
 
     return loss.item()
 
@@ -261,10 +268,17 @@ def streaming_train(
     """
     print("\n" + "=" * 60)
     print("Starting streaming training...")
+    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
+    print(f"  Accumulation steps: {config.accumulation_steps}")
     print("=" * 60)
 
     checkpoint_idx = 0
-    
+    accumulation_steps = config.accumulation_steps
+    train_count = 0  # train items since last optimizer step
+
+    # Initialize gradient state for accumulation
+    optimizer.zero_grad()
+
     # Create progress bar
     pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
 
@@ -284,17 +298,29 @@ def streaming_train(
             if replay_buffer is not None and len(replay_buffer) > 0:
                 replay_batch = replay_buffer.sample(config.replay_batch_size, device=str(device))
 
-            # Perform update
+            # Compute loss and accumulate gradients
             loss = perform_update(
                 model,
                 criterion,
-                optimizer,
                 stream_item.image,
                 torch.tensor(stream_item.target, dtype=torch.float32),
                 replay_batch,
                 device,
                 replay_weight=config.replay_weight,
+                accumulation_steps=accumulation_steps,
             )
+
+            train_count += 1
+
+            # Step optimizer after accumulating enough gradients
+            if train_count % accumulation_steps == 0:
+                if config.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        config.max_grad_norm,
+                    )
+                optimizer.step()
+                optimizer.zero_grad()
 
         # Offer every item to the replay buffer (regardless of filter action)
         # so the buffer stays representative of the full stream distribution.
@@ -329,6 +355,16 @@ def streaming_train(
                     "train_rate": f"{filter_stats.get('train_rate', 1.0):.3f}",
                 })
 
+    # Flush any remaining accumulated gradients
+    if train_count % accumulation_steps != 0:
+        if config.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                config.max_grad_norm,
+            )
+        optimizer.step()
+        optimizer.zero_grad()
+
     print("\n" + "=" * 60)
     print("Streaming training complete!")
     print("=" * 60)
@@ -362,7 +398,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
     shutil.copy(config_path, run_dir / "config.yaml")
 
     # Transforms
-    train_transform, val_transform = get_default_transforms()
+    train_transform, val_transform = get_classification_transforms()
 
     # Create streaming datasets
     print("\nLoading streaming datasets...")

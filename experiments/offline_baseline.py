@@ -32,9 +32,9 @@ warnings.filterwarnings("ignore", message="Can't initialize NVML")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from stream_active_fl.core import (
-    ZODFrameDataset,
-    collate_drop_none,
-    get_default_transforms,
+    ZODClassificationDataset,
+    classification_collate,
+    get_classification_transforms,
 )
 from stream_active_fl.evaluation import compute_metrics, evaluate_offline
 from stream_active_fl.logging import MetricsLogger, create_run_dir, save_run_info
@@ -97,7 +97,7 @@ class Config:
 # Dataset utilities
 # =============================================================================
 
-def compute_pos_weight(dataset: ZODFrameDataset) -> float:
+def compute_pos_weight(dataset: ZODClassificationDataset) -> float:
     """Compute pos_weight for BCEWithLogitsLoss based on class imbalance."""
     num_positive = sum(1 for _, _, t, _ in dataset.samples if t == 1.0)
     num_negative = len(dataset.samples) - num_positive
@@ -188,11 +188,11 @@ def main(config: Config, config_path: Path, command: str) -> None:
     shutil.copy(config_path, run_dir / "config.yaml")
 
     # Transforms
-    train_transform, val_transform = get_default_transforms()
+    train_transform, val_transform = get_classification_transforms()
 
     # Datasets
     print("\nLoading datasets...")
-    train_dataset = ZODFrameDataset(
+    train_dataset = ZODClassificationDataset(
         dataset_root=config.dataset_root,
         annotations_dir=annotations_dir,
         split="train",
@@ -203,7 +203,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         verbose=True,
     )
 
-    val_dataset = ZODFrameDataset(
+    val_dataset = ZODClassificationDataset(
         dataset_root=config.dataset_root,
         annotations_dir=annotations_dir,
         split="val",
@@ -245,7 +245,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        collate_fn=collate_drop_none,
+        collate_fn=classification_collate,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
     )
@@ -255,7 +255,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
-        collate_fn=collate_drop_none,
+        collate_fn=classification_collate,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
     )

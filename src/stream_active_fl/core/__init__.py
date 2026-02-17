@@ -1,20 +1,44 @@
 """
 Core abstractions for stream learning.
 
-This module contains fundamental data structures and dataset implementations:
-- ZODFrameDataset: Offline frame-level dataset with batch sampling
-- StreamingDataset: Temporal sequence dataset for online learning
-- StreamItem: Single item in a data stream
-- Transforms and utilities for data loading
+Data structures and dataset implementations for the ZOD (Zenseact Open
+Dataset) autonomous-driving dataset, supporting both offline and streaming
+training for classification and detection tasks.
+
+Datasets:
+    ZODClassificationDataset         Offline classification (shuffled, DataLoader-compatible)
+    ZODDetectionDataset     Offline detection (shuffled, DataLoader-compatible)
+    StreamingDataset        Online streaming for both tasks (temporal order, iterator)
+
+Data:
+    StreamItem              Single frame flowing through the streaming pipeline
+
+Transforms & augmentation:
+    get_classification_transforms      Classification transforms (Resize + Normalize)
+    get_detection_transforms    Detection transforms (ToTensor only)
+    DetectionAugmentation       Spatial + photometric augmentation for detection
+    get_detection_augmentation  Factory for DetectionAugmentation
+
+Collate functions:
+    classification_collate       Classification batching (drops failed reads)
+    detection_collate       Detection batching (variable-length annotations)
+
+Constants:
+    CATEGORY_ID_TO_NAME     {0: "person", 1: "car", 2: "traffic_light"}
+    CATEGORY_NAME_TO_ID     Inverse mapping
 """
 
 from .datasets import (
     CATEGORY_ID_TO_NAME,
     CATEGORY_NAME_TO_ID,
-    ZODFrameDataset,
+    DetectionAugmentation,
+    ZODDetectionDataset,
+    ZODClassificationDataset,
     StreamingDataset,
-    collate_drop_none,
-    get_default_transforms,
+    classification_collate,
+    detection_collate,
+    get_classification_transforms,
+    get_detection_augmentation,
     get_detection_transforms,
 )
 from .items import StreamItem
@@ -22,10 +46,14 @@ from .items import StreamItem
 __all__ = [
     "CATEGORY_ID_TO_NAME",
     "CATEGORY_NAME_TO_ID",
-    "ZODFrameDataset",
+    "DetectionAugmentation",
+    "ZODDetectionDataset",
+    "ZODClassificationDataset",
     "StreamingDataset",
     "StreamItem",
-    "collate_drop_none",
-    "get_default_transforms",
+    "classification_collate",
+    "detection_collate",
+    "get_classification_transforms",
+    "get_detection_augmentation",
     "get_detection_transforms",
 ]
