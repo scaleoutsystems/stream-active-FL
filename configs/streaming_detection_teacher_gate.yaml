@@ -1,10 +1,10 @@
-# Streaming detection with adaptive difficulty filter + teacher confidence gate
-# Tests the combined effect of both filtering mechanisms
+# Streaming detection with teacher confidence gate (no difficulty filtering)
+# Tests whether removing low-confidence pseudo-labels helps
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/detection_streaming_difficulty_adaptive_teacher_gate"
+output_dir: "outputs/streaming_detection_teacher_gate"
 
 # Dataset
 min_score: 0.5
@@ -30,12 +30,7 @@ hflip_prob: 0.5
 color_jitter: true
 
 # Filtering
-filter_policy: "difficulty"
-adaptive: true
-train_fraction: 0.3
-loss_window_size: 500
-warmup_items: 200
-store_skipped: false
+filter_policy: "none"
 tau_teacher: 0.5
 
 # Replay buffer

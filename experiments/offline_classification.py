@@ -1,11 +1,11 @@
 """
-Offline baseline training experiment.
+Offline classification training experiment.
 
 Trains a binary classifier on the full ZOD dataset (shuffled, multi-epoch)
 to establish an upper-bound baseline for comparison with streaming methods.
 
 Usage:
-    python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+    python experiments/offline_classification.py --config configs/offline_classification.yaml
 """
 
 from __future__ import annotations
@@ -47,13 +47,13 @@ from stream_active_fl.utils import set_seed, worker_init_fn
 # =============================================================================
 
 @dataclass
-class Config:
-    """Experiment configuration."""
+class OfflineClassificationConfig:
+    """Offline classification experiment configuration."""
 
     # Paths
     dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
     annotations_dir: str = "data/annotations_640x360"
-    output_dir: str = "outputs/offline_baseline"
+    output_dir: str = "outputs/offline_classification"
 
     # Dataset
     target_category: int = 0
@@ -86,7 +86,7 @@ class Config:
     device: str = "cuda"
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "Config":
+    def from_yaml(cls, path: str | Path) -> "OfflineClassificationConfig":
         """Load config from YAML file."""
         with open(path, "r") as f:
             data = yaml.safe_load(f)
@@ -164,7 +164,7 @@ def train_one_epoch(
 # Main
 # =============================================================================
 
-def main(config: Config, config_path: Path, command: str) -> None:
+def main(config: OfflineClassificationConfig, config_path: Path, command: str) -> None:
     """Run offline baseline training."""
 
     start_time = datetime.now()
@@ -389,11 +389,11 @@ def main(config: Config, config_path: Path, command: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Offline baseline training")
+    parser = argparse.ArgumentParser(description="Offline classification training")
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/offline_baseline.yaml",
+        default="configs/offline_classification.yaml",
         help="Path to config YAML file",
     )
     args = parser.parse_args()
@@ -406,5 +406,5 @@ if __name__ == "__main__":
     # Reconstruct the command for logging
     command = " ".join(sys.argv)
 
-    config = Config.from_yaml(config_path)
+    config = OfflineClassificationConfig.from_yaml(config_path)
     main(config, config_path, command)

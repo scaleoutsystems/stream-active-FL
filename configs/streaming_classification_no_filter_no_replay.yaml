@@ -1,10 +1,10 @@
-# Streaming with teacher confidence gate (no difficulty filtering)
-# Tests whether removing uncertain positive pseudo-labels helps
+# Streaming baseline: no filtering, no replay
+# Pure single-pass streaming (lower bound)
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/streaming_teacher_gate"
+output_dir: "outputs/streaming_classification_no_filter_no_replay"
 
 # Dataset
 target_category: 0
@@ -27,14 +27,9 @@ pos_weight: "auto"
 
 # Filtering
 filter_policy: "none"
-tau_teacher: 0.7
 
 # Replay buffer
-use_replay: true
-replay_capacity: 2000
-replay_batch_size: 32
-replay_admission_policy: "reservoir"
-replay_weight: 0.5
+use_replay: false
 
 # Evaluation
 eval_every_n_items: 5000

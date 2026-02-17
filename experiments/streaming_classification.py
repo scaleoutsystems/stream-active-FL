@@ -1,12 +1,12 @@
 """
-Streaming baseline training experiment.
+Streaming classification training experiment.
 
 Trains a classifier on ZOD sequences in strict temporal order with optional
 filtering and replay. This is the core streaming learning pipeline.
 
 Usage:
-    python experiments/streaming_baseline.py --config configs/streaming_no_filter.yaml
-    python experiments/streaming_baseline.py --config configs/streaming_difficulty_adaptive.yaml
+    python experiments/streaming_classification.py --config configs/streaming_classification_no_filter.yaml
+    python experiments/streaming_classification.py --config configs/streaming_classification_difficulty_adaptive.yaml
 """
 
 from __future__ import annotations
@@ -36,13 +36,7 @@ from stream_active_fl.evaluation import evaluate_streaming_classification
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
 from stream_active_fl.models import Classifier
-from stream_active_fl.policies import (
-    DifficultyBasedPolicy,
-    FilterPolicy,
-    NoFilterPolicy,
-    TeacherConfidenceGate,
-    TopKPolicy,
-)
+from stream_active_fl.policies import FilterPolicy, create_filter_policy
 from stream_active_fl.utils import set_seed
 
 
@@ -51,13 +45,13 @@ from stream_active_fl.utils import set_seed
 # =============================================================================
 
 @dataclass
-class Config:
-    """Streaming experiment configuration."""
+class StreamingClassificationConfig:
+    """Streaming classification experiment configuration."""
 
     # Paths
     dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
     annotations_dir: str = "data/annotations_640x360"
-    output_dir: str = "outputs/streaming_baseline"
+    output_dir: str = "outputs/streaming_classification"
 
     # Dataset
     target_category: int = 0
@@ -119,7 +113,7 @@ class Config:
     device: str = "cuda"
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "Config":
+    def from_yaml(cls, path: str | Path) -> "StreamingClassificationConfig":
         """Load config from YAML file."""
         with open(path, "r") as f:
             data = yaml.safe_load(f)
@@ -147,38 +141,6 @@ def compute_pos_weight_from_streaming_dataset(dataset: StreamingDataset) -> floa
         return 1.0
     return num_negative / num_positive
 
-
-def create_filter_policy(config: Config) -> FilterPolicy:
-    """Create filter policy from config, optionally wrapped with teacher gate."""
-    # Build the inner policy
-    if config.filter_policy == "none":
-        policy = NoFilterPolicy()
-    elif config.filter_policy == "difficulty":
-        policy = DifficultyBasedPolicy(
-            adaptive=config.adaptive,
-            train_fraction=config.train_fraction,
-            loss_window_size=config.loss_window_size,
-            warmup_items=config.warmup_items,
-            tau_loss=config.tau_loss,
-            store_skipped=config.store_skipped,
-        )
-    elif config.filter_policy == "topk":
-        policy = TopKPolicy(
-            window_size=config.topk_window_size,
-            k=config.topk_k,
-        )
-    else:
-        raise ValueError(f"Unknown filter policy: {config.filter_policy}")
-
-    # Optionally wrap with teacher confidence gate
-    if config.tau_teacher > 0.0:
-        policy = TeacherConfidenceGate(
-            inner_policy=policy,
-            tau_teacher=config.tau_teacher,
-            store_gated=config.store_gated,
-        )
-
-    return policy
 
 
 def perform_update(
@@ -258,7 +220,7 @@ def streaming_train(
     replay_buffer: Optional[ReplayBuffer],
     metrics_logger: StreamingMetricsLogger,
     device: torch.device,
-    config: Config,
+    config: StreamingClassificationConfig,
 ) -> None:
     """
     Main streaming training loop.
@@ -374,7 +336,7 @@ def streaming_train(
 # Main
 # =============================================================================
 
-def main(config: Config, config_path: Path, command: str) -> None:
+def main(config: StreamingClassificationConfig, config_path: Path, command: str) -> None:
     """Run streaming baseline training."""
 
     start_time = datetime.now()
@@ -563,7 +525,7 @@ def main(config: Config, config_path: Path, command: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Streaming baseline training")
+    parser = argparse.ArgumentParser(description="Streaming classification training")
     parser.add_argument(
         "--config",
         type=str,
@@ -580,5 +542,5 @@ if __name__ == "__main__":
     # Reconstruct command for logging
     command = " ".join(sys.argv)
 
-    config = Config.from_yaml(config_path)
+    config = StreamingClassificationConfig.from_yaml(config_path)
     main(config, config_path, command)

@@ -2,10 +2,10 @@
 Streaming 2D object detection experiment.
 
 Trains an FCOS detector on ZOD sequences in strict temporal order with optional
-filtering and replay. Parallel to streaming_baseline.py but for detection.
+filtering and replay. Parallel to streaming_classification.py but for detection.
 
 Usage:
-    python experiments/streaming_detection.py --config configs/detection_streaming_no_filter.yaml
+    python experiments/streaming_detection.py --config configs/streaming_detection_no_filter.yaml
 """
 
 from __future__ import annotations
@@ -35,13 +35,7 @@ from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
 from stream_active_fl.models import Detector
-from stream_active_fl.policies import (
-    DifficultyBasedPolicy,
-    FilterPolicy,
-    NoFilterPolicy,
-    TeacherConfidenceGate,
-    TopKPolicy,
-)
+from stream_active_fl.policies import FilterPolicy, create_filter_policy
 from stream_active_fl.utils import set_seed
 
 
@@ -50,13 +44,13 @@ from stream_active_fl.utils import set_seed
 # =============================================================================
 
 @dataclass
-class DetectionConfig:
+class StreamingDetectionConfig:
     """Streaming detection experiment configuration."""
 
     # Paths
     dataset_root: str = "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
     annotations_dir: str = "data/annotations_640x360"
-    output_dir: str = "outputs/detection_streaming_no_filter"
+    output_dir: str = "outputs/streaming_detection"
 
     # Dataset
     min_score: float = 0.5
@@ -121,7 +115,7 @@ class DetectionConfig:
     device: str = "cuda"
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "DetectionConfig":
+    def from_yaml(cls, path: str | Path) -> "StreamingDetectionConfig":
         """Load config from YAML file."""
         with open(path, "r") as f:
             data = yaml.safe_load(f)
@@ -131,36 +125,6 @@ class DetectionConfig:
 # =============================================================================
 # Training utilities
 # =============================================================================
-
-def create_filter_policy(config: DetectionConfig) -> FilterPolicy:
-    """Create filter policy from config, optionally wrapped with teacher gate."""
-    if config.filter_policy == "none":
-        policy = NoFilterPolicy()
-    elif config.filter_policy == "difficulty":
-        policy = DifficultyBasedPolicy(
-            adaptive=config.adaptive,
-            train_fraction=config.train_fraction,
-            loss_window_size=config.loss_window_size,
-            warmup_items=config.warmup_items,
-            tau_loss=config.tau_loss,
-            store_skipped=config.store_skipped,
-        )
-    elif config.filter_policy == "topk":
-        policy = TopKPolicy(
-            window_size=config.topk_window_size,
-            k=config.topk_k,
-        )
-    else:
-        raise ValueError(f"Unknown filter policy: {config.filter_policy}")
-
-    if config.tau_teacher > 0.0:
-        policy = TeacherConfidenceGate(
-            inner_policy=policy,
-            tau_teacher=config.tau_teacher,
-            store_gated=config.store_gated,
-        )
-
-    return policy
 
 
 def perform_detection_update(
@@ -239,7 +203,7 @@ def streaming_detection_train(
     replay_buffer: Optional[ReplayBuffer],
     metrics_logger: StreamingMetricsLogger,
     device: torch.device,
-    config: DetectionConfig,
+    config: StreamingDetectionConfig,
 ) -> None:
     """
     Main streaming detection training loop.
@@ -360,7 +324,7 @@ def streaming_detection_train(
 # Main
 # =============================================================================
 
-def main(config: DetectionConfig, config_path: Path, command: str) -> None:
+def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> None:
     """Run streaming detection training."""
 
     start_time = datetime.now()
@@ -578,5 +542,5 @@ if __name__ == "__main__":
 
     command = " ".join(sys.argv)
 
-    config = DetectionConfig.from_yaml(config_path)
+    config = StreamingDetectionConfig.from_yaml(config_path)
     main(config, config_path, command)

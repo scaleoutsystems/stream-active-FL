@@ -4,7 +4,7 @@
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/detection_streaming_difficulty_adaptive"
+output_dir: "outputs/streaming_detection_difficulty_adaptive"
 
 # Dataset
 min_score: 0.5

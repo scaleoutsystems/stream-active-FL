@@ -1,49 +1,43 @@
-# Streaming detection with teacher confidence gate (no difficulty filtering)
-# Tests whether removing low-confidence pseudo-labels helps
+# Streaming baseline: no filtering (train on every item)
+# Establishes the streaming baseline with replay
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/detection_streaming_teacher_gate"
+output_dir: "outputs/streaming_classification_no_filter"
 
 # Dataset
+target_category: 0
 min_score: 0.5
 subsample_steps: 5
 
 # Model
-num_classes: 4
-trainable_backbone_layers: 0
-image_min_size: 360
-image_max_size: 640
-pretrained_backbone: true
+backbone: "resnet50"
+pretrained: true
+freeze_backbone: true
+dropout: 0.0
 load_checkpoint: null
 
 # Training
-learning_rate: 1.0e-4
+learning_rate: 3.0e-4
 weight_decay: 1.0e-4
-max_grad_norm: 1.0
-accumulation_steps: 1
 
-# Augmentation
-augment: true
-hflip_prob: 0.5
-color_jitter: true
+# Class imbalance
+pos_weight: "auto"
 
 # Filtering
 filter_policy: "none"
-tau_teacher: 0.5
 
 # Replay buffer
 use_replay: true
 replay_capacity: 2000
-replay_batch_size: 16
+replay_batch_size: 32
 replay_admission_policy: "reservoir"
 replay_weight: 0.5
 
 # Evaluation
 eval_every_n_items: 5000
 checkpoint_interval: 1000
-score_threshold: 0.3
 
 # Reproducibility
 seed: 42

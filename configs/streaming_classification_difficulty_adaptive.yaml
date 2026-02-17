@@ -1,10 +1,10 @@
-# Streaming baseline: no filtering, no replay
-# Pure single-pass streaming (lower bound)
+# Streaming with adaptive difficulty-based filtering
+# Trains on the top 30% hardest items (by loss)
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/streaming_no_filter_no_replay"
+output_dir: "outputs/streaming_classification_difficulty_adaptive"
 
 # Dataset
 target_category: 0
@@ -26,10 +26,19 @@ weight_decay: 1.0e-4
 pos_weight: "auto"
 
 # Filtering
-filter_policy: "none"
+filter_policy: "difficulty"
+adaptive: true
+train_fraction: 0.3
+loss_window_size: 500
+warmup_items: 200
+store_skipped: false
 
 # Replay buffer
-use_replay: false
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 32
+replay_admission_policy: "reservoir"
+replay_weight: 0.5
 
 # Evaluation
 eval_every_n_items: 5000

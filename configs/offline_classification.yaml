@@ -4,7 +4,7 @@
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"       # relative to project root
-output_dir: "outputs/offline_baseline"           # checkpoints and logs
+output_dir: "outputs/offline_classification"           # checkpoints and logs
 
 # Dataset
 target_category: 0        # 0=person, 1=car, 2=traffic_light

@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import shutil
 import sys
 import time
@@ -39,7 +38,7 @@ from stream_active_fl.core import (
     get_detection_transforms,
 )
 from stream_active_fl.evaluation import evaluate_detection
-from stream_active_fl.logging import create_run_dir, save_run_info
+from stream_active_fl.logging import OfflineMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.models import Detector
 from stream_active_fl.utils import set_seed, worker_init_fn
 
@@ -252,16 +251,16 @@ def main(config: OfflineDetectionConfig, config_path: Path, command: str) -> Non
         weight_decay=config.weight_decay,
     )
 
-    # Initialize CSV log
-    checkpoints_file = run_dir / "checkpoints.csv"
-    with open(checkpoints_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
+    # Initialize metrics logger with detection-specific fields
+    metrics_logger = OfflineMetricsLogger(
+        run_dir,
+        fieldnames=[
             "epoch", "train_loss",
             "eval_mAP", "eval_mAP_50", "eval_mAP_75",
             "eval_AP_person", "eval_AP_car", "eval_AP_traffic_light",
             "epoch_time_s",
-        ])
+        ],
+    )
 
     # Training loop
     print("\n" + "=" * 60)
@@ -321,19 +320,17 @@ def main(config: OfflineDetectionConfig, config_path: Path, command: str) -> Non
                 print(f"         Saved best model (mAP={best_mAP:.4f})")
 
         # Log to CSV
-        with open(checkpoints_file, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                epoch,
-                f"{train_metrics['loss']:.4f}",
-                f"{eval_metrics['mAP']:.4f}" if eval_metrics else "",
-                f"{eval_metrics['mAP_50']:.4f}" if eval_metrics else "",
-                f"{eval_metrics['mAP_75']:.4f}" if eval_metrics else "",
-                f"{eval_metrics.get('AP_person', 0.0):.4f}" if eval_metrics else "",
-                f"{eval_metrics.get('AP_car', 0.0):.4f}" if eval_metrics else "",
-                f"{eval_metrics.get('AP_traffic_light', 0.0):.4f}" if eval_metrics else "",
-                f"{epoch_time:.1f}",
-            ])
+        metrics_logger.log({
+            "epoch": epoch,
+            "train_loss": f"{train_metrics['loss']:.4f}",
+            "eval_mAP": f"{eval_metrics['mAP']:.4f}" if eval_metrics else "",
+            "eval_mAP_50": f"{eval_metrics['mAP_50']:.4f}" if eval_metrics else "",
+            "eval_mAP_75": f"{eval_metrics['mAP_75']:.4f}" if eval_metrics else "",
+            "eval_AP_person": f"{eval_metrics.get('AP_person', 0.0):.4f}" if eval_metrics else "",
+            "eval_AP_car": f"{eval_metrics.get('AP_car', 0.0):.4f}" if eval_metrics else "",
+            "eval_AP_traffic_light": f"{eval_metrics.get('AP_traffic_light', 0.0):.4f}" if eval_metrics else "",
+            "epoch_time_s": f"{epoch_time:.1f}",
+        })
 
     # Save final model
     torch.save(

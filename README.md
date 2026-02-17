@@ -7,14 +7,14 @@ Experimental code for a master thesis on **client-side filtering** for continuou
 From the repo root:
 
 ```bash
-# Offline baseline (upper bound)
-python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+# Offline classification baseline (upper bound)
+python experiments/offline_classification.py --config configs/offline_classification.yaml
 
-# Streaming with replay
-python experiments/streaming_baseline.py --config configs/streaming_no_filter.yaml
+# Streaming classification with replay
+python experiments/streaming_classification.py --config configs/streaming_classification_no_filter.yaml
 ```
 
-Detection experiments use `experiments/streaming_detection.py` and `configs/detection_*.yaml`.
+Detection experiments use `experiments/streaming_detection.py` and `configs/streaming_detection_*.yaml`.
 
 ## Install
 
