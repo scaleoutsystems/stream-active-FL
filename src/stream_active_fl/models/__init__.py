@@ -1,6 +1,11 @@
-"""Model definitions."""
+"""
+Model definitions.
+
+    Classifier  Binary classification (ResNet backbone + linear head)
+    Detector    Object detection (FCOS with ResNet50-FPN backbone)
+"""
 
 from .classifier import Classifier
-from .detector import StreamingDetector
+from .detector import Detector
 
-__all__ = ["Classifier", "StreamingDetector"]
+__all__ = ["Classifier", "Detector"]

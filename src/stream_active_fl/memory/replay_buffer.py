@@ -127,6 +127,12 @@ class ReplayBuffer:
             For classification: Batched dict with "image", "target", "teacher_score" tensors.
             For detection: Dict with "images" (list of tensors) and "targets" (list of dicts).
             Returns None if buffer is empty.
+
+        Note:
+            Classification and detection return different dict structures.
+            Classification uses singular keys ("image", "target") with stacked
+            tensors; detection uses plural keys ("images", "targets") with lists,
+            because annotations have variable length per frame.
         """
         if len(self.buffer) == 0:
             return None
@@ -176,6 +182,9 @@ class ReplayBuffer:
         """Return current buffer size."""
         return len(self.buffer)
 
+    def __repr__(self) -> str:
+        return f"ReplayBuffer(size={len(self)}/{self.capacity}, policy={self.admission_policy})"
+
     def is_full(self) -> bool:
         """Check if buffer is at capacity."""
         return len(self.buffer) >= self.capacity
@@ -189,18 +198,25 @@ class ReplayBuffer:
         self.total_seen = 0
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get buffer statistics, including class distribution."""
+        """
+        Get buffer statistics, including class distribution.
+
+        Note:
+            The positive/negative counts are classification-specific (binary
+            target == 1.0). For detection tasks these counters will be zero;
+            use ``size`` and ``utilization`` instead.
+        """
         n = len(self.buffer)
 
-        # Count positives and negatives in buffer
+        # Count positives and negatives (classification only — binary targets)
         n_positive = 0
         if n > 0:
             for item in self.buffer:
                 target = item["target"]
-                if isinstance(target, torch.Tensor):
+                if isinstance(target, torch.Tensor) and target.ndim == 0:
                     if target.item() == 1.0:
                         n_positive += 1
-                elif target == 1.0:
+                elif isinstance(target, (int, float)) and target == 1.0:
                     n_positive += 1
         n_negative = n - n_positive
 

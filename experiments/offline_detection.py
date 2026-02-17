@@ -40,7 +40,7 @@ from stream_active_fl.core import (
 )
 from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.logging import create_run_dir, save_run_info
-from stream_active_fl.models import StreamingDetector
+from stream_active_fl.models import Detector
 from stream_active_fl.utils import set_seed, worker_init_fn
 
 
@@ -235,7 +235,7 @@ def main(config: OfflineDetectionConfig, config_path: Path, command: str) -> Non
 
     # Model
     print("\nInitializing detection model...")
-    model = StreamingDetector(
+    model = Detector(
         num_classes=config.num_classes,
         trainable_backbone_layers=config.trainable_backbone_layers,
         image_min_size=config.image_min_size,

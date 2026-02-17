@@ -34,7 +34,7 @@ from stream_active_fl.core.items import StreamItem
 from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
-from stream_active_fl.models import StreamingDetector
+from stream_active_fl.models import Detector
 from stream_active_fl.policies import (
     DifficultyBasedPolicy,
     FilterPolicy,
@@ -183,7 +183,7 @@ def perform_detection_update(
     separate forward passes with explicit weighting.
 
     Args:
-        model: Detection model (StreamingDetector).
+        model: Detection model (Detector).
         stream_item: Current stream item with annotations.
         replay_batch: Optional dict with "images" and "targets" lists.
         device: Device to run on.
@@ -422,7 +422,7 @@ def main(config: DetectionConfig, config_path: Path, command: str) -> None:
 
     # Model
     print("\nInitializing detection model...")
-    model = StreamingDetector(
+    model = Detector(
         num_classes=config.num_classes,
         trainable_backbone_layers=config.trainable_backbone_layers,
         image_min_size=config.image_min_size,

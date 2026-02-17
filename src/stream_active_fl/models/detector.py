@@ -1,10 +1,10 @@
 """
-Streaming object detector using torchvision's FCOS.
+Object detector using torchvision's FCOS.
 
-Provides an FCOS-based detector with a ResNet50-FPN backbone, designed for
-streaming learning. The backbone can be frozen while the FPN and detection
-head remain trainable, giving a middle ground between the few-parameter
-classification head and full end-to-end training.
+Provides an FCOS-based detector with a ResNet50-FPN backbone, suitable for
+both offline and streaming learning. The backbone can be frozen while the
+FPN and detection head remain trainable, giving a middle ground between the
+few-parameter classification head and full end-to-end training.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from torchvision.models import ResNet50_Weights
 from torchvision.models.detection import fcos_resnet50_fpn
 
 
-class StreamingDetector(nn.Module):
+class Detector(nn.Module):
     """
     Object detector for streaming learning, using FCOS with ResNet50-FPN.
 
@@ -99,11 +99,11 @@ class StreamingDetector(nn.Module):
         trainable = self.get_trainable_params()
         total = self.get_total_params()
         return (
-            f"StreamingDetector(\n"
+            f"Detector(\n"
             f"  backbone=resnet50_fpn,\n"
             f"  num_classes={self.num_classes},\n"
             f"  trainable_backbone_layers={self._trainable_backbone_layers},\n"
-            f"  image_size={self.image_max_size}x{self.image_min_size} (WxH),\n"
+            f"  image_min_size={self.image_min_size}, image_max_size={self.image_max_size},\n"
             f"  trainable_params={trainable:,} / {total:,} "
             f"({100 * trainable / total:.1f}%)\n"
             f")"
