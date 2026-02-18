@@ -112,6 +112,7 @@ def load_classification_frame_info(
 def load_detection_frame_info(
     ann_path: Path,
     min_score: float,
+    min_box_area: float = 0.0,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Load per-frame detection annotations for all categories.
@@ -121,6 +122,9 @@ def load_detection_frame_info(
     Args:
         ann_path: Path to per-sequence annotation JSON.
         min_score: Minimum detection score to include.
+        min_box_area: Minimum bounding box area (width * height) to include.
+            Boxes smaller than this are silently dropped. Useful for filtering
+            tiny pseudo-labels that are below the detector's effective resolution.
 
     Returns:
         Dict mapping frame_idx -> {
@@ -138,6 +142,9 @@ def load_detection_frame_info(
     for ann in annotations:
         score = float(ann.get("score", 1.0))
         if score < min_score:
+            continue
+        x, y, w, h = ann["bbox"]
+        if w * h < min_box_area:
             continue
         frame_annotations[ann["frame_idx"]].append({
             "bbox": ann["bbox"],
@@ -516,6 +523,8 @@ class ZODDetectionDataset(Dataset):
         split: "train", "val", or None.
         transform: Torchvision transform to apply to images (e.g. ToTensor).
         min_score: Minimum detection score to include.
+        min_box_area: Minimum box area (w*h) to include. Drops tiny boxes
+            that are below the detector's effective resolution.
         subsample_steps: Use every Nth frame (1 = all frames).
         augmentation: Optional DetectionAugmentation for training.
             Applied to (PIL image, target) before the image transform.
@@ -535,6 +544,7 @@ class ZODDetectionDataset(Dataset):
         split: Optional[Literal["train", "val"]] = None,
         transform: Optional[Callable] = None,
         min_score: float = 0.0,
+        min_box_area: float = 0.0,
         subsample_steps: int = 1,
         augmentation: Optional[DetectionAugmentation] = None,
         verbose: bool = True,
@@ -545,6 +555,7 @@ class ZODDetectionDataset(Dataset):
         self.split = split
         self.transform = transform
         self.min_score = min_score
+        self.min_box_area = min_box_area
         self.subsample_steps = subsample_steps
         self.augmentation = augmentation
 
@@ -579,7 +590,9 @@ class ZODDetectionDataset(Dataset):
 
             # Load detection annotations for this sequence
             ann_path = self.annotations_dir / f"{seq_id}.json"
-            frame_info = load_detection_frame_info(ann_path, self.min_score)
+            frame_info = load_detection_frame_info(
+                ann_path, self.min_score, self.min_box_area,
+            )
             self.frame_info_map[seq_idx] = frame_info
 
             for frame_idx in range(0, len(frames), self.subsample_steps):
@@ -610,6 +623,7 @@ class ZODDetectionDataset(Dataset):
         print(f"  Split              : {self.split or 'all'}")
         print(f"  Categories         : {cats}")
         print(f"  Min score filter   : {self.min_score}")
+        print(f"  Min box area       : {self.min_box_area}")
         print(f"  Subsample steps    : {self.subsample_steps}")
         print(f"  Augmentation       : {'yes' if self.augmentation else 'no'}")
         print("-" * 60)
@@ -702,6 +716,8 @@ class StreamingDataset:
         target_category: Category ID (0=person, 1=car, 2=traffic_light).
             Only used for classification; ignored for detection.
         min_score: Minimum pseudo-label score to include a detection.
+        min_box_area: Minimum box area (w*h) to include. Only used for
+            detection; ignored for classification.
         subsample_steps: Use every Nth frame (1 = all frames).
         task: ``"classification"`` or ``"detection"``.
         augmentation: Optional :class:`DetectionAugmentation` applied to
@@ -727,6 +743,7 @@ class StreamingDataset:
         transform: Optional[Callable] = None,
         target_category: int = 0,
         min_score: float = 0.0,
+        min_box_area: float = 0.0,
         subsample_steps: int = 1,
         task: Literal["classification", "detection"] = "classification",
         augmentation: Optional[DetectionAugmentation] = None,
@@ -739,6 +756,7 @@ class StreamingDataset:
         self.transform = transform
         self.target_category = target_category
         self.min_score = min_score
+        self.min_box_area = min_box_area
         self.subsample_steps = subsample_steps
         self.task = task
         self.augmentation = augmentation
@@ -785,7 +803,9 @@ class StreamingDataset:
     def _load_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
         """Load per-frame info (dispatches based on task)."""
         if self.task == "detection":
-            return load_detection_frame_info(ann_path, self.min_score)
+            return load_detection_frame_info(
+                ann_path, self.min_score, self.min_box_area,
+            )
         return load_classification_frame_info(ann_path, self.target_category, self.min_score)
 
     def _read_frame_image(self, frames: Any, frame_idx: int) -> Optional[Image.Image]:
@@ -863,6 +883,8 @@ class StreamingDataset:
             cats = ", ".join(f"{v} ({k})" for k, v in CATEGORY_ID_TO_NAME.items())
             print(f"  Categories       : {cats}")
         print(f"  Min score filter : {self.min_score}")
+        if self.task == "detection" and self.min_box_area > 0:
+            print(f"  Min box area     : {self.min_box_area}")
         print(f"  Subsample steps  : {self.subsample_steps}")
         print("-" * 60)
         print(f"  Total sequences  : {len(self.sequence_metadata)}")

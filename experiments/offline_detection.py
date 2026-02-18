@@ -58,6 +58,7 @@ class OfflineDetectionConfig:
 
     # Dataset
     min_score: float = 0.5
+    min_box_area: float = 0.0
     subsample_steps: int = 5
 
     # Model
@@ -189,6 +190,7 @@ def main(config: OfflineDetectionConfig, config_path: Path, command: str) -> Non
         split="train",
         transform=train_transform,
         min_score=config.min_score,
+        min_box_area=config.min_box_area,
         subsample_steps=config.subsample_steps,
         augmentation=train_augmentation,
         verbose=True,
@@ -201,6 +203,7 @@ def main(config: OfflineDetectionConfig, config_path: Path, command: str) -> Non
         split="val",
         transform=val_transform,
         min_score=config.min_score,
+        min_box_area=config.min_box_area,
         subsample_steps=config.subsample_steps,
         task="detection",
         verbose=True,

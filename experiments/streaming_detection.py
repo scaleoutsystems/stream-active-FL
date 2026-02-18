@@ -54,6 +54,7 @@ class StreamingDetectionConfig:
 
     # Dataset
     min_score: float = 0.5
+    min_box_area: float = 0.0
     subsample_steps: int = 1
 
     # Model
@@ -367,6 +368,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         split="train",
         transform=train_transform,
         min_score=config.min_score,
+        min_box_area=config.min_box_area,
         subsample_steps=config.subsample_steps,
         task="detection",
         augmentation=train_augmentation,
@@ -379,6 +381,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         split="val",
         transform=val_transform,
         min_score=config.min_score,
+        min_box_area=config.min_box_area,
         subsample_steps=config.subsample_steps,
         task="detection",
         verbose=True,

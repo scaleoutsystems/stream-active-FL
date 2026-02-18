@@ -9,6 +9,7 @@ output_dir: "outputs/offline_detection"
 
 # Dataset
 min_score: 0.5
+min_box_area: 128
 subsample_steps: 5
 
 # Model (FCOS with ResNet50-FPN)
@@ -21,7 +22,7 @@ pretrained_backbone: true
 # Training
 batch_size: 4
 num_workers: 4
-epochs: 10
+epochs: 24
 learning_rate: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
