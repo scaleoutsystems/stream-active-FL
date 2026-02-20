@@ -23,7 +23,7 @@ learning_rate: 3.0e-4
 weight_decay: 1.0e-4
 
 # Class imbalance
-pos_weight: "auto"
+pos_weight: "running"
 
 # Filtering
 filter_policy: "difficulty"

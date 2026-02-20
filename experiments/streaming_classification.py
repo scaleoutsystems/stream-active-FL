@@ -73,8 +73,9 @@ class StreamingClassificationConfig:
     max_grad_norm: float = 0.0
     accumulation_steps: int = 1
 
-    # Class imbalance
-    pos_weight: str | float = "auto"
+    # Class imbalance: "running" updates pos_weight online as items are seen
+    # (honest streaming). A fixed float disables the running estimate.
+    pos_weight: str | float = "running"
 
     # Filtering policy
     filter_policy: Literal["none", "difficulty", "topk"] = "none"
@@ -124,22 +125,51 @@ class StreamingClassificationConfig:
 # Training utilities
 # =============================================================================
 
-def compute_pos_weight_from_streaming_dataset(dataset: StreamingDataset) -> float:
-    """Compute pos_weight from streaming dataset metadata."""
-    num_positive = 0
-    total = 0
-    for seq_meta in dataset.sequence_metadata:
-        frame_info = seq_meta["frame_info"]
-        for frame_idx in range(0, seq_meta["num_frames"], dataset.subsample_steps):
-            info = frame_info.get(frame_idx, {"has_target": False})
-            if info["has_target"]:
-                num_positive += 1
-            total += 1
-    
-    num_negative = total - num_positive
-    if num_positive == 0:
-        return 1.0
-    return num_negative / num_positive
+class RunningPosWeight:
+    """
+    Maintains a running estimate of pos_weight for BCEWithLogitsLoss.
+
+    Updates incrementally as stream items are observed, so the loss weighting
+    reflects only data seen so far (honest streaming — no peeking at future
+    class ratios). Starts at 1.0 (balanced assumption) and converges as more
+    items arrive.
+
+    The weight is ``n_negative / n_positive``, clamped to [0.1, 20.0] to
+    avoid extreme values during early warm-up when counts are small.
+    """
+
+    def __init__(self, pos_weight_tensor: torch.Tensor):
+        self._pos_weight_tensor = pos_weight_tensor
+        self._n_positive = 0
+        self._n_negative = 0
+
+    def update(self, target: float) -> None:
+        """Observe one stream item's binary target (0.0 or 1.0)."""
+        if target >= 0.5:
+            self._n_positive += 1
+        else:
+            self._n_negative += 1
+        self._recompute()
+
+    def _recompute(self) -> None:
+        if self._n_positive == 0:
+            weight = 1.0
+        else:
+            weight = self._n_negative / self._n_positive
+        weight = max(0.1, min(weight, 20.0))
+        self._pos_weight_tensor.fill_(weight)
+
+    @property
+    def value(self) -> float:
+        return self._pos_weight_tensor.item()
+
+    @property
+    def n_positive(self) -> int:
+        return self._n_positive
+
+    @property
+    def n_negative(self) -> int:
+        return self._n_negative
 
 
 
@@ -221,6 +251,7 @@ def streaming_train(
     metrics_logger: StreamingMetricsLogger,
     device: torch.device,
     config: StreamingClassificationConfig,
+    running_pos_weight: Optional[RunningPosWeight] = None,
 ) -> None:
     """
     Main streaming training loop.
@@ -245,6 +276,10 @@ def streaming_train(
     pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
 
     for stream_item in pbar:
+        # Update running class balance estimate (every item, before filtering)
+        if running_pos_weight is not None:
+            running_pos_weight.update(stream_item.target)
+
         # Select action using filter policy
         action = filter_policy.select_action(stream_item, model, criterion, device)
 
@@ -327,6 +362,10 @@ def streaming_train(
         optimizer.step()
         optimizer.zero_grad()
 
+    if running_pos_weight is not None:
+        print(f"\nFinal running pos_weight: {running_pos_weight.value:.3f} "
+              f"(pos={running_pos_weight.n_positive}, neg={running_pos_weight.n_negative})")
+
     print("\n" + "=" * 60)
     print("Streaming training complete!")
     print("=" * 60)
@@ -406,14 +445,17 @@ def main(config: StreamingClassificationConfig, config_path: Path, command: str)
     print(model)
 
     # Loss function
-    if config.pos_weight == "auto":
-        pos_weight_value = compute_pos_weight_from_streaming_dataset(train_stream)
-        print(f"\nAuto-computed pos_weight: {pos_weight_value:.2f}")
+    running_pos_weight = None
+    if config.pos_weight == "running":
+        pos_weight_tensor = torch.tensor([1.0], device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        running_pos_weight = RunningPosWeight(pos_weight_tensor)
+        print(f"\nUsing running pos_weight (starts at 1.0, updates online)")
     else:
         pos_weight_value = float(config.pos_weight)
-
-    pos_weight_tensor = torch.tensor([pos_weight_value], device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        pos_weight_tensor = torch.tensor([pos_weight_value], device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        print(f"\nFixed pos_weight: {pos_weight_value:.2f}")
 
     # Optimizer
     optimizer = torch.optim.Adam(
@@ -483,6 +525,7 @@ def main(config: StreamingClassificationConfig, config_path: Path, command: str)
         metrics_logger=metrics_logger,
         device=device,
         config=config,
+        running_pos_weight=running_pos_weight,
     )
 
     # Final evaluation
