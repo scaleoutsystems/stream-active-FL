@@ -20,11 +20,11 @@ class StreamItem:
     Carries both classification and detection information so the same
     StreamItem can be consumed by either pipeline:
 
-    - **Classification**: Uses ``image``, ``target`` (binary 0/1), and
-      ``teacher_score`` (max pseudo-label confidence for the target category).
-    - **Detection**: Additionally uses ``annotations``, a dict with
-      ``"boxes"`` (FloatTensor[N, 4] in xyxy format) and ``"labels"``
-      (Int64Tensor[N], 1-indexed with 0 reserved for background).
+    - Classification: Uses image, target (binary 0/1), and teacher_score
+      (max pseudo-label confidence for the target category).
+    - Detection: Additionally uses annotations, a dict with "boxes"
+      (FloatTensor[N, 4] in xyxy format) and "labels" (Int64Tensor[N],
+      1-indexed with 0 reserved for background).
 
     Attributes:
         image: Image tensor of shape (C, H, W).

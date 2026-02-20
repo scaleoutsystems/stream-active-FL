@@ -62,8 +62,18 @@ class RunningPosWeight:
     class ratios). Starts at 1.0 (balanced assumption) and converges as more
     items arrive.
 
-    The weight is ``n_negative / n_positive``, clamped to [0.1, 20.0] to
+    The weight is n_negative / n_positive, clamped to [0.1, 20.0] to
     avoid extreme values during early warm-up when counts are small.
+
+    Federated learning note: In FL, this estimator persists across rounds
+    and accumulates over the client's entire stream lifetime. This is
+    intentional — each client's stream is a single temporal pass (items are
+    never revisited), so the cumulative count is the honest class distribution
+    seen so far. Resetting at each round would discard history and cause
+    unstable weighting during the first items of every round (starting from
+    the 1.0 balanced prior each time). The pos_weight tracks the *data*
+    distribution, not the model, so it remains valid even after the model is
+    replaced by the global aggregate.
     """
 
     def __init__(self, pos_weight_tensor: torch.Tensor):
@@ -118,8 +128,8 @@ def perform_classification_update(
     """
     Compute classification loss and accumulate gradients (backward pass only).
 
-    The caller is responsible for ``optimizer.zero_grad()``, gradient clipping,
-    and ``optimizer.step()``. This separation enables gradient accumulation
+    The caller is responsible for optimizer.zero_grad(), gradient clipping,
+    and optimizer.step().  This separation enables gradient accumulation
     across multiple stream items.
 
     Computes separate losses for the current item and replay batch, then
@@ -131,10 +141,10 @@ def perform_classification_update(
         criterion: Loss function (e.g. BCEWithLogitsLoss).
         image: Current stream item image tensor (C, H, W).
         target: Current stream item target tensor (scalar).
-        replay_batch: Optional dict with ``"image"`` and ``"target"`` tensors.
+        replay_batch: Optional dict with "image" and "target" tensors.
         device: Device to run on.
-        replay_weight: Weight for replay loss. Current item gets
-            ``1 - replay_weight``. Default 0.5 gives equal weight.
+        replay_weight: Weight for replay loss.  Current item gets
+            1 - replay_weight.  Default 0.5 gives equal weight.
         accumulation_steps: Divides loss by this value so accumulated
             gradient magnitude matches a single-step update.
 
@@ -181,10 +191,10 @@ def perform_detection_update(
     Args:
         model: Detection model (e.g. FCOS).
         stream_item: Current stream item with annotations.
-        replay_batch: Optional dict with ``"images"`` and ``"targets"`` lists.
+        replay_batch: Optional dict with "images" and "targets" lists.
         device: Device to run on.
-        replay_weight: Weight for replay loss. Current gets
-            ``1 - replay_weight``.
+        replay_weight: Weight for replay loss.  Current gets
+            1 - replay_weight.
         accumulation_steps: Divides loss by this value for accumulation.
 
     Returns:
@@ -278,9 +288,9 @@ def train_on_classification_stream(
 
     Args:
         model: The classifier to train.
-        stream: Iterable of :class:`StreamItem` (e.g. ``StreamingDataset``
-            or a client's sub-stream iterator).
-        criterion: Loss function (e.g. ``BCEWithLogitsLoss``).
+        stream: Iterable of StreamItem (e.g. a StreamingDataset or a
+            client's sub-stream iterator).
+        criterion: Loss function (e.g. BCEWithLogitsLoss).
         optimizer: Optimizer for the model parameters.
         filter_policy: Policy that decides train/store/skip per item.
         device: Device to run computations on.
@@ -291,23 +301,23 @@ def train_on_classification_stream(
         max_grad_norm: Maximum gradient norm for clipping (0 = disabled).
         accumulation_steps: Accumulate gradients over this many items
             before stepping the optimizer.
-        max_items: Stop after processing this many items (``None`` = exhaust
+        max_items: Stop after processing this many items (None = exhaust
             the stream). Useful for FL where each client processes a fixed
             budget per round.
         running_pos_weight: Optional online pos_weight estimator.
-        filter_computes_forward: Set to ``True`` when the filter policy
-            performs its own forward pass (e.g. difficulty-based). Used
-            for accurate forward-pass counting in the metrics logger.
+        filter_computes_forward: Set True when the filter policy performs
+            its own forward pass (e.g. difficulty-based).  Used for
+            accurate forward-pass counting in the metrics logger.
         metrics_logger: Optional logger for streaming metrics and checkpoints.
-        eval_fn: Optional evaluation callback ``(model) -> metrics_dict``,
+        eval_fn: Optional evaluation callback (model) -> metrics_dict,
             called at checkpoint intervals.
         eval_every_n_checkpoints: Evaluate every N checkpoints (default 1).
         progress_bar: Show a tqdm progress bar.
-        total_items: Total expected items (for progress bar). Automatically
-            used from ``stream`` if it has ``__len__``.
+        total_items: Total expected items (for progress bar).  Automatically
+            used from stream if it has __len__.
 
     Returns:
-        :class:`StreamingTrainResult` with processing statistics.
+        StreamingTrainResult with processing statistics.
     """
     if total_items is None and hasattr(stream, "__len__"):
         total_items = len(stream)
@@ -427,12 +437,12 @@ def train_on_detection_stream(
     """
     Train a detector on a stream of items in temporal order.
 
-    Same structure as :func:`train_on_classification_stream` but uses
-    the detection-specific update path (model computes its own losses).
+    Same structure as train_on_classification_stream but uses the
+    detection-specific update path (model computes its own losses).
 
     Args:
         model: The detection model to train (e.g. FCOS).
-        stream: Iterable of :class:`StreamItem` with detection annotations.
+        stream: Iterable of StreamItem with detection annotations.
         optimizer: Optimizer for the model parameters.
         filter_policy: Policy that decides train/store/skip per item.
         device: Device to run computations on.
@@ -441,16 +451,16 @@ def train_on_detection_stream(
         replay_weight: Weight for replay loss vs. current item loss.
         max_grad_norm: Maximum gradient norm for clipping (0 = disabled).
         accumulation_steps: Accumulate gradients over this many items.
-        max_items: Stop after this many items (``None`` = exhaust stream).
+        max_items: Stop after this many items (None = exhaust stream).
         filter_computes_forward: Whether the filter does its own forward pass.
         metrics_logger: Optional logger for streaming metrics.
-        eval_fn: Optional evaluation callback ``(model) -> metrics_dict``.
+        eval_fn: Optional evaluation callback (model) -> metrics_dict.
         eval_every_n_checkpoints: Evaluate every N checkpoints.
         progress_bar: Show a tqdm progress bar.
         total_items: Total expected items (for progress bar).
 
     Returns:
-        :class:`StreamingTrainResult` with processing statistics.
+        StreamingTrainResult with processing statistics.
     """
     if total_items is None and hasattr(stream, "__len__"):
         total_items = len(stream)

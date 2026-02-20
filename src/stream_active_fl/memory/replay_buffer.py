@@ -204,7 +204,7 @@ class ReplayBuffer:
         Note:
             The positive/negative counts are classification-specific (binary
             target == 1.0). For detection tasks these counters will be zero;
-            use ``size`` and ``utilization`` instead.
+            use size and utilization instead.
         """
         n = len(self.buffer)
 

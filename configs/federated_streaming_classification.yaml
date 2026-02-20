@@ -1,0 +1,54 @@
+# Federated streaming classification experiment
+# Simulates FedAvg with multiple clients, each streaming through
+# a disjoint partition of ZOD sequences.
+
+# Paths
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+annotations_dir: "data/annotations_640x360"
+output_dir: "outputs/federated_streaming_classification"
+
+# Dataset
+target_category: 0
+min_score: 0.5
+subsample_steps: 5
+
+# Model
+backbone: "resnet50"
+pretrained: true
+freeze_backbone: true
+dropout: 0.0
+load_checkpoint: null
+
+# --- Federated settings ---
+num_clients: 3
+num_rounds: 15
+items_per_round: 1000         # each client sees this many items per round
+partition_strategy: "uniform"  # "uniform" (shuffled) or "contiguous"
+
+# --- Local training (per-client, per-round) ---
+learning_rate: 3.0e-4
+weight_decay: 1.0e-4
+max_grad_norm: 0.0
+accumulation_steps: 1
+
+# Class imbalance
+pos_weight: "running"
+
+# Filtering (applied per-client)
+filter_policy: "none"
+
+# Replay buffer (per-client, persists across rounds)
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 32
+replay_admission_policy: "reservoir"
+replay_weight: 0.5
+
+# Evaluation
+eval_every_n_rounds: 1
+
+# Reproducibility
+seed: 42
+
+# Device
+device: "cuda"

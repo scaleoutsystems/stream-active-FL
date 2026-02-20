@@ -1,0 +1,58 @@
+# Federated streaming detection experiment
+# Simulates FedAvg with multiple clients, each streaming through
+# a disjoint partition of ZOD sequences.
+
+# Paths
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+annotations_dir: "data/annotations_640x360"
+output_dir: "outputs/federated_streaming_detection"
+
+# Dataset
+min_score: 0.5
+min_box_area: 128
+subsample_steps: 5
+
+# Model (FCOS with ResNet50-FPN, frozen backbone)
+num_classes: 4
+trainable_backbone_layers: 0
+image_min_size: 360
+image_max_size: 640
+pretrained_backbone: true
+load_checkpoint: null
+
+# Augmentation
+augment: true
+hflip_prob: 0.5
+color_jitter: true
+
+# --- Federated settings ---
+num_clients: 3
+num_rounds: 15
+items_per_round: 1000
+partition_strategy: "uniform"
+
+# --- Local training (per-client, per-round) ---
+learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+max_grad_norm: 1.0
+accumulation_steps: 1
+
+# Filtering (applied per-client)
+filter_policy: "none"
+
+# Replay buffer (per-client, persists across rounds)
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 16
+replay_admission_policy: "reservoir"
+replay_weight: 0.5
+
+# Evaluation
+eval_every_n_rounds: 1
+score_threshold: 0.3
+
+# Reproducibility
+seed: 42
+
+# Device
+device: "cuda"

@@ -32,9 +32,9 @@ def create_filter_policy(config: Any) -> FilterPolicy:
     """
     Create a filter policy from an experiment config dataclass.
 
-    Reads ``filter_policy``, difficulty/topk parameters, and
-    ``tau_teacher`` from *config* to build the appropriate policy,
-    optionally wrapped with a :class:`TeacherConfidenceGate`.
+    Reads filter_policy, difficulty/topk parameters, and tau_teacher
+    from config to build the appropriate policy,
+    optionally wrapped with a TeacherConfidenceGate.
 
     Args:
         config: Any experiment config dataclass that exposes the standard

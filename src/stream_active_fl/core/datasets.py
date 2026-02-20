@@ -704,14 +704,14 @@ class StreamingDataset:
     frame whether to train, store, or skip.
 
     Supports two tasks:
-    - ``"classification"``: Binary labels (has target category or not).
-    - ``"detection"``: Bounding boxes and class labels for all categories.
+    - "classification": Binary labels (has target category or not).
+    - "detection": Bounding boxes and class labels for all categories.
 
     Args:
         dataset_root: Path to ZOD dataset root.
         annotations_dir: Path to directory with per-sequence annotation JSONs.
-        version: ZOD version, ``"full"`` or ``"mini"``.
-        split: ``"train"`` or ``"val"``.
+        version: ZOD version, "full" or "mini".
+        split: "train" or "val".
         transform: Image transform applied after augmentation (e.g. ToTensor).
         target_category: Category ID (0=person, 1=car, 2=traffic_light).
             Only used for classification; ignored for detection.
@@ -719,13 +719,13 @@ class StreamingDataset:
         min_box_area: Minimum box area (w*h) to include. Only used for
             detection; ignored for classification.
         subsample_steps: Use every Nth frame (1 = all frames).
-        task: ``"classification"`` or ``"detection"``.
-        augmentation: Optional :class:`DetectionAugmentation` applied to
-            (PIL image, target dict) pairs before ``transform``.
-            Only used when ``task="detection"``.
+        task: "classification" or "detection".
+        augmentation: Optional DetectionAugmentation applied to
+            (PIL image, target dict) pairs before transform.
+            Only used when task="detection".
         verbose: Print dataset statistics after loading.
 
-    Usage::
+    Usage:
 
         dataset = StreamingDataset(...)
         for stream_item in dataset:
@@ -829,7 +829,7 @@ class StreamingDataset:
 
         Handles detection annotation formatting, augmentation, and the
         image transform so that all frame-processing logic lives in one
-        place (used by both ``__iter__`` and ``get_sequence_iterator``).
+        place (used by both __iter__ and get_sequence_iterator).
         """
         target = 1.0 if info.get("has_target", False) else 0.0
         teacher_score = info.get("max_score", 0.0)
@@ -909,7 +909,7 @@ class StreamingDataset:
         """
         Iterate over all stream items in strict temporal order.
 
-        Yields one :class:`StreamItem` per (subsampled) frame, processing
+        Yields one StreamItem per (subsampled) frame, processing
         sequences one after another. Frames that fail to load are silently
         skipped (the global index still increments to keep provenance
         consistent).
@@ -951,7 +951,7 @@ class StreamingDataset:
             seq_idx: Index of the sequence to iterate over.
 
         Yields:
-            :class:`StreamItem` for each (subsampled) frame in the sequence.
+            StreamItem for each (subsampled) frame in the sequence.
 
         Raises:
             ValueError: If *seq_idx* is out of range.

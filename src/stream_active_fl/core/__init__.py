@@ -42,10 +42,12 @@ from .datasets import (
     get_detection_transforms,
 )
 from .items import StreamItem
+from .partitioning import ClientStream, partition_sequences
 
 __all__ = [
     "CATEGORY_ID_TO_NAME",
     "CATEGORY_NAME_TO_ID",
+    "ClientStream",
     "DetectionAugmentation",
     "ZODDetectionDataset",
     "ZODClassificationDataset",
@@ -56,4 +58,5 @@ __all__ = [
     "get_classification_transforms",
     "get_detection_augmentation",
     "get_detection_transforms",
+    "partition_sequences",
 ]
