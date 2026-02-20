@@ -14,16 +14,14 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 import yaml
 
 # Suppress NVML warning (cosmetic, GPU still works fine)
@@ -36,7 +34,8 @@ from stream_active_fl.evaluation import evaluate_streaming_classification
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
 from stream_active_fl.models import Classifier
-from stream_active_fl.policies import FilterPolicy, create_filter_policy
+from stream_active_fl.policies import create_filter_policy
+from stream_active_fl.training import RunningPosWeight, train_on_classification_stream
 from stream_active_fl.utils import set_seed
 
 
@@ -119,256 +118,6 @@ class StreamingClassificationConfig:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-
-
-# =============================================================================
-# Training utilities
-# =============================================================================
-
-class RunningPosWeight:
-    """
-    Maintains a running estimate of pos_weight for BCEWithLogitsLoss.
-
-    Updates incrementally as stream items are observed, so the loss weighting
-    reflects only data seen so far (honest streaming — no peeking at future
-    class ratios). Starts at 1.0 (balanced assumption) and converges as more
-    items arrive.
-
-    The weight is ``n_negative / n_positive``, clamped to [0.1, 20.0] to
-    avoid extreme values during early warm-up when counts are small.
-    """
-
-    def __init__(self, pos_weight_tensor: torch.Tensor):
-        self._pos_weight_tensor = pos_weight_tensor
-        self._n_positive = 0
-        self._n_negative = 0
-
-    def update(self, target: float) -> None:
-        """Observe one stream item's binary target (0.0 or 1.0)."""
-        if target >= 0.5:
-            self._n_positive += 1
-        else:
-            self._n_negative += 1
-        self._recompute()
-
-    def _recompute(self) -> None:
-        if self._n_positive == 0:
-            weight = 1.0
-        else:
-            weight = self._n_negative / self._n_positive
-        weight = max(0.1, min(weight, 20.0))
-        self._pos_weight_tensor.fill_(weight)
-
-    @property
-    def value(self) -> float:
-        return self._pos_weight_tensor.item()
-
-    @property
-    def n_positive(self) -> int:
-        return self._n_positive
-
-    @property
-    def n_negative(self) -> int:
-        return self._n_negative
-
-
-
-def perform_update(
-    model: nn.Module,
-    criterion: nn.Module,
-    image: torch.Tensor,
-    target: torch.Tensor,
-    replay_batch: Optional[Dict[str, torch.Tensor]],
-    device: torch.device,
-    replay_weight: float = 0.5,
-    accumulation_steps: int = 1,
-) -> float:
-    """
-    Compute loss and accumulate gradients (backward pass only).
-
-    The caller is responsible for optimizer.zero_grad(), gradient clipping,
-    and optimizer.step(). This separation enables gradient accumulation
-    across multiple stream items.
-
-    Computes separate losses for the current item and replay batch, then
-    combines them with explicit weighting. This prevents the replay batch
-    (typically 32 samples) from drowning out the current item's gradient.
-
-    Args:
-        model: The model to update.
-        criterion: Loss function.
-        image: Current stream item image tensor.
-        target: Current stream item target tensor.
-        replay_batch: Optional dict with "image" and "target" tensors.
-        device: Device to run on.
-        replay_weight: Weight for replay loss. Current item loss gets
-            weight (1 - replay_weight). Default 0.5 gives equal weight.
-        accumulation_steps: Number of items over which gradients are accumulated.
-            Loss is divided by this value so accumulated gradient magnitude
-            matches a single-step update.
-
-    Returns:
-        Unscaled combined loss value (for logging).
-    """
-    model.train()
-
-    # Current item loss
-    image = image.unsqueeze(0).to(device)
-    target = target.unsqueeze(0).to(device)
-    logits_current = model(image)
-    loss_current = criterion(logits_current, target)
-
-    if replay_batch is not None:
-        # Replay loss (computed separately)
-        replay_images = replay_batch["image"].to(device)
-        replay_targets = replay_batch["target"].to(device)
-        logits_replay = model(replay_images)
-        loss_replay = criterion(logits_replay, replay_targets)
-
-        # Weighted combination: equal voice for current item and replay
-        loss = (1.0 - replay_weight) * loss_current + replay_weight * loss_replay
-    else:
-        loss = loss_current
-
-    # Scale loss for gradient accumulation and backward
-    (loss / accumulation_steps).backward()
-
-    return loss.item()
-
-
-# =============================================================================
-# Main streaming loop
-# =============================================================================
-
-def streaming_train(
-    model: nn.Module,
-    train_stream: StreamingDataset,
-    val_stream: StreamingDataset,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    filter_policy: FilterPolicy,
-    replay_buffer: Optional[ReplayBuffer],
-    metrics_logger: StreamingMetricsLogger,
-    device: torch.device,
-    config: StreamingClassificationConfig,
-    running_pos_weight: Optional[RunningPosWeight] = None,
-) -> None:
-    """
-    Main streaming training loop.
-
-    Processes train_stream in temporal order, applying filter policy and
-    optionally using replay. Periodically evaluates on val_stream.
-    """
-    print("\n" + "=" * 60)
-    print("Starting streaming training...")
-    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
-    print(f"  Accumulation steps: {config.accumulation_steps}")
-    print("=" * 60)
-
-    checkpoint_idx = 0
-    accumulation_steps = config.accumulation_steps
-    train_count = 0  # train items since last optimizer step
-
-    # Initialize gradient state for accumulation
-    optimizer.zero_grad()
-
-    # Create progress bar
-    pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
-
-    for stream_item in pbar:
-        # Update running class balance estimate (every item, before filtering)
-        if running_pos_weight is not None:
-            running_pos_weight.update(stream_item.target)
-
-        # Select action using filter policy
-        action = filter_policy.select_action(stream_item, model, criterion, device)
-
-        # Log stream item processing
-        forward_pass = (action == "train") or (config.filter_policy != "none")
-        backward_pass = (action == "train")
-        metrics_logger.log_stream_item(action, forward_pass, backward_pass)
-
-        # Execute action
-        if action == "train":
-            # Sample replay batch if available
-            replay_batch = None
-            if replay_buffer is not None and len(replay_buffer) > 0:
-                replay_batch = replay_buffer.sample(config.replay_batch_size, device=str(device))
-
-            # Compute loss and accumulate gradients
-            loss = perform_update(
-                model,
-                criterion,
-                stream_item.image,
-                torch.tensor(stream_item.target, dtype=torch.float32),
-                replay_batch,
-                device,
-                replay_weight=config.replay_weight,
-                accumulation_steps=accumulation_steps,
-            )
-
-            train_count += 1
-
-            # Step optimizer after accumulating enough gradients
-            if train_count % accumulation_steps == 0:
-                if config.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in model.parameters() if p.requires_grad],
-                        config.max_grad_norm,
-                    )
-                optimizer.step()
-                optimizer.zero_grad()
-
-        # Offer every item to the replay buffer (regardless of filter action)
-        # so the buffer stays representative of the full stream distribution.
-        # The buffer's admission policy (e.g. reservoir sampling) decides
-        # whether to actually store or reject each item.
-        if replay_buffer is not None:
-            replay_buffer.add(stream_item.to_dict())
-
-        # Checkpoint and evaluation
-        if metrics_logger.should_checkpoint():
-            checkpoint_idx += 1
-
-            # Log checkpoint metrics
-            buffer_stats = replay_buffer.get_stats() if replay_buffer else None
-            filter_stats = filter_policy.get_stats()
-            metrics_logger.log_checkpoint(checkpoint_idx, buffer_stats, filter_stats)
-
-            # Log per-class filter selection stats (interval since last checkpoint)
-            selection_stats = filter_policy.get_selection_stats()
-            metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)
-            filter_policy.reset_selection_stats()
-
-            # Evaluate on validation stream
-            eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
-            if checkpoint_idx % eval_interval == 0:
-                eval_metrics = evaluate_streaming_classification(model, val_stream, criterion, device)
-                metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
-
-                # Update progress bar
-                pbar.set_postfix({
-                    "val_f1": f"{eval_metrics['f1']:.3f}",
-                    "train_rate": f"{filter_stats.get('train_rate', 1.0):.3f}",
-                })
-
-    # Flush any remaining accumulated gradients
-    if train_count % accumulation_steps != 0:
-        if config.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                config.max_grad_norm,
-            )
-        optimizer.step()
-        optimizer.zero_grad()
-
-    if running_pos_weight is not None:
-        print(f"\nFinal running pos_weight: {running_pos_weight.value:.3f} "
-              f"(pos={running_pos_weight.n_positive}, neg={running_pos_weight.n_negative})")
-
-    print("\n" + "=" * 60)
-    print("Streaming training complete!")
-    print("=" * 60)
 
 
 # =============================================================================
@@ -513,20 +262,45 @@ def main(config: StreamingClassificationConfig, config_path: Path, command: str)
         repo_path=PROJECT_ROOT,
     )
 
+    # Build evaluation callback
+    eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
+
+    def eval_fn(m: nn.Module) -> dict:
+        return evaluate_streaming_classification(m, val_stream, criterion, device)
+
     # Run streaming training
-    streaming_train(
+    print("\n" + "=" * 60)
+    print("Starting streaming training...")
+    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
+    print(f"  Accumulation steps: {config.accumulation_steps}")
+    print("=" * 60)
+
+    result = train_on_classification_stream(
         model=model,
-        train_stream=train_stream,
-        val_stream=val_stream,
+        stream=train_stream,
         criterion=criterion,
         optimizer=optimizer,
         filter_policy=filter_policy,
-        replay_buffer=replay_buffer,
-        metrics_logger=metrics_logger,
         device=device,
-        config=config,
+        replay_buffer=replay_buffer,
+        replay_batch_size=config.replay_batch_size,
+        replay_weight=config.replay_weight,
+        max_grad_norm=config.max_grad_norm,
+        accumulation_steps=config.accumulation_steps,
         running_pos_weight=running_pos_weight,
+        filter_computes_forward=(config.filter_policy != "none"),
+        metrics_logger=metrics_logger,
+        eval_fn=eval_fn,
+        eval_every_n_checkpoints=eval_interval,
+        total_items=len(train_stream),
     )
+
+    print("\n" + "=" * 60)
+    print("Streaming training complete!")
+    print(f"  Items processed: {result.items_processed}")
+    print(f"  Items trained:   {result.items_trained}")
+    print(f"  Optimizer steps: {result.optimizer_steps}")
+    print("=" * 60)
 
     # Final evaluation
     print("\nFinal evaluation...")

@@ -17,11 +17,10 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 import yaml
 
 # Suppress NVML warning (cosmetic, GPU still works fine)
@@ -30,12 +29,12 @@ warnings.filterwarnings("ignore", message="Can't initialize NVML")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from stream_active_fl.core import StreamingDataset, get_detection_augmentation, get_detection_transforms
-from stream_active_fl.core.items import StreamItem
 from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
 from stream_active_fl.memory import ReplayBuffer
 from stream_active_fl.models import Detector
-from stream_active_fl.policies import FilterPolicy, create_filter_policy
+from stream_active_fl.policies import create_filter_policy
+from stream_active_fl.training import train_on_detection_stream
 from stream_active_fl.utils import set_seed
 
 
@@ -121,204 +120,6 @@ class StreamingDetectionConfig:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-
-
-# =============================================================================
-# Training utilities
-# =============================================================================
-
-
-def perform_detection_update(
-    model: nn.Module,
-    stream_item: StreamItem,
-    replay_batch: Optional[Dict[str, Any]],
-    device: torch.device,
-    replay_weight: float = 0.5,
-    accumulation_steps: int = 1,
-) -> float:
-    """
-    Compute detection loss and accumulate gradients (backward pass only).
-
-    The caller is responsible for optimizer.zero_grad(), gradient clipping,
-    and optimizer.step(). This separation enables gradient accumulation
-    across multiple stream items.
-
-    The detection model computes its own loss internally (classification +
-    bbox regression + centerness). Current item and replay batch get
-    separate forward passes with explicit weighting.
-
-    Args:
-        model: Detection model (Detector).
-        stream_item: Current stream item with annotations.
-        replay_batch: Optional dict with "images" and "targets" lists.
-        device: Device to run on.
-        replay_weight: Weight for replay loss. Current gets (1 - replay_weight).
-        accumulation_steps: Number of items over which gradients are accumulated.
-            Loss is divided by this value so accumulated gradient magnitude
-            matches a single-step update.
-
-    Returns:
-        Unscaled combined loss value (for logging).
-    """
-    model.train()
-
-    # Current item loss
-    image = stream_item.image.to(device)
-    target = {
-        "boxes": stream_item.annotations["boxes"].to(device),
-        "labels": stream_item.annotations["labels"].to(device),
-    }
-    loss_dict = model([image], [target])
-    loss_current = sum(loss_dict.values())
-
-    if replay_batch is not None:
-        # Replay loss (separate forward pass for proper weighting)
-        replay_images = [img.to(device) for img in replay_batch["images"]]
-        replay_targets = [
-            {"boxes": t["boxes"].to(device), "labels": t["labels"].to(device)}
-            for t in replay_batch["targets"]
-        ]
-        loss_dict_replay = model(replay_images, replay_targets)
-        loss_replay = sum(loss_dict_replay.values())
-
-        loss = (1.0 - replay_weight) * loss_current + replay_weight * loss_replay
-    else:
-        loss = loss_current
-
-    # Scale loss for gradient accumulation and backward
-    (loss / accumulation_steps).backward()
-
-    return loss.item()
-
-
-# =============================================================================
-# Main streaming loop
-# =============================================================================
-
-def streaming_detection_train(
-    model: nn.Module,
-    train_stream: StreamingDataset,
-    val_stream: StreamingDataset,
-    optimizer: torch.optim.Optimizer,
-    filter_policy: FilterPolicy,
-    replay_buffer: Optional[ReplayBuffer],
-    metrics_logger: StreamingMetricsLogger,
-    device: torch.device,
-    config: StreamingDetectionConfig,
-) -> None:
-    """
-    Main streaming detection training loop.
-
-    Processes train_stream in temporal order, applying filter policy and
-    optionally using replay. Periodically evaluates on val_stream with mAP.
-    """
-    print("\n" + "=" * 60)
-    print("Starting streaming detection training...")
-    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
-    print(f"  Accumulation steps: {config.accumulation_steps}")
-    print("=" * 60)
-
-    checkpoint_idx = 0
-    accumulation_steps = config.accumulation_steps
-    train_count = 0  # train items since last optimizer step
-
-    # criterion=None for detection (model computes its own loss)
-    # but filter policies require it in their signature
-    criterion = None
-
-    # Initialize gradient state for accumulation
-    optimizer.zero_grad()
-
-    pbar = tqdm(train_stream, desc="Processing stream", total=len(train_stream))
-
-    for stream_item in pbar:
-        # Select action using filter policy
-        action = filter_policy.select_action(stream_item, model, criterion, device)
-
-        # Log stream item processing
-        forward_pass = (action == "train") or (config.filter_policy != "none")
-        backward_pass = (action == "train")
-        metrics_logger.log_stream_item(action, forward_pass, backward_pass)
-
-        # Execute action
-        if action == "train":
-            # Sample replay batch if available
-            replay_batch = None
-            if replay_buffer is not None and len(replay_buffer) > 0:
-                replay_batch = replay_buffer.sample(
-                    config.replay_batch_size, device=str(device)
-                )
-
-            # Compute loss and accumulate gradients
-            loss = perform_detection_update(
-                model,
-                stream_item,
-                replay_batch,
-                device,
-                replay_weight=config.replay_weight,
-                accumulation_steps=accumulation_steps,
-            )
-
-            train_count += 1
-
-            # Step optimizer after accumulating enough gradients
-            if train_count % accumulation_steps == 0:
-                if config.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in model.parameters() if p.requires_grad],
-                        config.max_grad_norm,
-                    )
-                optimizer.step()
-                optimizer.zero_grad()
-
-        # Offer every item to the replay buffer
-        if replay_buffer is not None:
-            replay_buffer.add(stream_item.to_dict())
-
-        # Checkpoint and evaluation
-        if metrics_logger.should_checkpoint():
-            checkpoint_idx += 1
-
-            # Log checkpoint metrics
-            buffer_stats = replay_buffer.get_stats() if replay_buffer else None
-            filter_stats = filter_policy.get_stats()
-            metrics_logger.log_checkpoint(checkpoint_idx, buffer_stats, filter_stats)
-
-            # Log per-class filter selection stats
-            selection_stats = filter_policy.get_selection_stats()
-            metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)
-            filter_policy.reset_selection_stats()
-
-            # Evaluate on validation stream
-            eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
-            if checkpoint_idx % eval_interval == 0:
-                eval_metrics = evaluate_detection(
-                    model,
-                    val_stream,
-                    device,
-                    score_threshold=config.score_threshold,
-                )
-                metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
-
-                pbar.set_postfix({
-                    "mAP": f"{eval_metrics['mAP']:.3f}",
-                    "mAP50": f"{eval_metrics.get('mAP_50', 0.0):.3f}",
-                    "train_rate": f"{filter_stats.get('train_rate', 1.0):.3f}",
-                })
-
-    # Flush any remaining accumulated gradients
-    if train_count % accumulation_steps != 0:
-        if config.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                config.max_grad_norm,
-            )
-        optimizer.step()
-        optimizer.zero_grad()
-
-    print("\n" + "=" * 60)
-    print("Streaming detection training complete!")
-    print("=" * 60)
 
 
 # =============================================================================
@@ -471,18 +272,43 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         repo_path=PROJECT_ROOT,
     )
 
+    # Build evaluation callback
+    eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
+
+    def eval_fn(m: nn.Module) -> dict:
+        return evaluate_detection(m, val_stream, device, score_threshold=config.score_threshold)
+
     # Run streaming detection training
-    streaming_detection_train(
+    print("\n" + "=" * 60)
+    print("Starting streaming detection training...")
+    print(f"  Gradient clipping: max_norm={config.max_grad_norm}")
+    print(f"  Accumulation steps: {config.accumulation_steps}")
+    print("=" * 60)
+
+    result = train_on_detection_stream(
         model=model,
-        train_stream=train_stream,
-        val_stream=val_stream,
+        stream=train_stream,
         optimizer=optimizer,
         filter_policy=filter_policy,
-        replay_buffer=replay_buffer,
-        metrics_logger=metrics_logger,
         device=device,
-        config=config,
+        replay_buffer=replay_buffer,
+        replay_batch_size=config.replay_batch_size,
+        replay_weight=config.replay_weight,
+        max_grad_norm=config.max_grad_norm,
+        accumulation_steps=config.accumulation_steps,
+        filter_computes_forward=(config.filter_policy != "none"),
+        metrics_logger=metrics_logger,
+        eval_fn=eval_fn,
+        eval_every_n_checkpoints=eval_interval,
+        total_items=len(train_stream),
     )
+
+    print("\n" + "=" * 60)
+    print("Streaming detection training complete!")
+    print(f"  Items processed: {result.items_processed}")
+    print(f"  Items trained:   {result.items_trained}")
+    print(f"  Optimizer steps: {result.optimizer_steps}")
+    print("=" * 60)
 
     # Final evaluation
     print("\nFinal evaluation...")
