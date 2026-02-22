@@ -21,6 +21,7 @@ from typing import Any
 from .filtering import (
     Action,
     FilterPolicy,
+    FilterResult,
     NoFilterPolicy,
     DifficultyBasedPolicy,
     TopKPolicy,
@@ -77,6 +78,7 @@ def create_filter_policy(config: Any) -> FilterPolicy:
 __all__ = [
     "Action",
     "FilterPolicy",
+    "FilterResult",
     "NoFilterPolicy",
     "DifficultyBasedPolicy",
     "TopKPolicy",

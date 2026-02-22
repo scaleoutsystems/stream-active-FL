@@ -12,6 +12,11 @@ Available policies:
 
 All policies can be wrapped with TeacherConfidenceGate to additionally
 filter out positive items with low-confidence pseudo-labels.
+
+When a policy that computes loss (e.g. DifficultyBasedPolicy, TopKPolicy)
+selects "train", it may return the loss tensor from its forward pass so the
+training loop can reuse it for the backward step, avoiding a second forward
+for the same item.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -28,6 +33,9 @@ from ..core.items import StreamItem
 
 
 Action = Literal["train", "store", "skip"]
+# When a policy computes loss for filtering and decides "train", it may return
+# that loss tensor so the training loop can reuse it (one forward instead of two).
+FilterResult = Tuple[Action, Optional[torch.Tensor]]
 
 
 # =============================================================================
@@ -164,18 +172,22 @@ class FilterPolicy(ABC):
         model: nn.Module,
         criterion: nn.Module,
         device: torch.device,
-    ) -> Action:
+    ) -> FilterResult:
         """
         Select an action for the given stream item.
 
         Args:
             stream_item: The current stream item.
             model: The current model.
-            criterion: Loss function.
+            criterion: Loss function (may be None for detection).
             device: Device to run computations on.
 
         Returns:
-            "train", "store", or "skip".
+            (action, precomputed_loss): action is "train", "store", or "skip".
+            precomputed_loss is a tensor to use for backward when action is
+            "train" and the policy already computed the current-item loss
+            (e.g. difficulty-based policies); otherwise None and the training
+            loop will perform its own forward.
         """
         pass
 
@@ -192,56 +204,64 @@ class FilterPolicy(ABC):
         self.selection_tracker.reset_interval()
 
 
-def _compute_detection_item_loss(
+def _compute_detection_item_loss_tensor(
     stream_item: StreamItem,
     model: nn.Module,
     device: torch.device,
-) -> float:
+) -> torch.Tensor:
     """
-    Compute detection loss for a single stream item (forward pass only, no grad).
+    Compute detection loss for a single stream item (forward with grad).
 
-    torchvision detection models must be in train() mode to return losses,
-    so we temporarily switch mode and restore it after.
+    Used by difficulty-based policies so the training loop can reuse this
+    loss for the backward pass instead of doing a second forward.
+    torchvision detection models must be in train() mode to return losses.
     """
-    was_training = model.training
-    model.train()  # torchvision detection models need train mode for losses
-    with torch.no_grad():
-        image = stream_item.image.to(device)
-        target = {
-            "boxes": stream_item.annotations["boxes"].to(device),
-            "labels": stream_item.annotations["labels"].to(device),
-        }
-        loss_dict = model([image], [target])
-        loss = sum(loss_dict.values())
-    if not was_training:
-        model.eval()
-    return loss.item()
+    model.train()
+    image = stream_item.image.to(device)
+    target = {
+        "boxes": stream_item.annotations["boxes"].to(device),
+        "labels": stream_item.annotations["labels"].to(device),
+    }
+    loss_dict = model([image], [target])
+    return sum(loss_dict.values())
 
 
-def _compute_item_loss(
+def _compute_classification_item_loss_tensor(
     stream_item: StreamItem,
     model: nn.Module,
     criterion: nn.Module,
     device: torch.device,
-) -> float:
+) -> torch.Tensor:
     """
-    Compute loss for a single stream item (forward pass only, no grad).
+    Compute classification loss for a single stream item (forward with grad).
 
-    Dispatches to detection or classification path based on whether the
-    stream item carries detection annotations.
+    Used by difficulty-based policies so the training loop can reuse this
+    loss for the backward pass instead of doing a second forward.
     """
-    # Detection path: model computes its own loss
+    model.train()
+    image = stream_item.image.unsqueeze(0).to(device)
+    target = torch.tensor([stream_item.target], dtype=torch.float32, device=device)
+    logits = model(image)
+    return criterion(logits, target)
+
+
+def _compute_item_loss_tensor(
+    stream_item: StreamItem,
+    model: nn.Module,
+    criterion: nn.Module,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Compute loss for a single stream item (forward with grad).
+
+    Dispatches to detection or classification. Returns a tensor so the
+    training loop can reuse it for backward when the policy selects "train".
+    """
     if stream_item.annotations is not None:
-        return _compute_detection_item_loss(stream_item, model, device)
-
-    # Classification path (original)
-    model.eval()
-    with torch.no_grad():
-        image = stream_item.image.unsqueeze(0).to(device)
-        target = torch.tensor([stream_item.target], dtype=torch.float32, device=device)
-        logits = model(image)
-        loss = criterion(logits, target)
-    return loss.item()
+        return _compute_detection_item_loss_tensor(stream_item, model, device)
+    return _compute_classification_item_loss_tensor(
+        stream_item, model, criterion, device
+    )
 
 
 # =============================================================================
@@ -289,7 +309,7 @@ class TeacherConfidenceGate(FilterPolicy):
         model: nn.Module,
         criterion: nn.Module,
         device: torch.device,
-    ) -> Action:
+    ) -> FilterResult:
         # Only gate positive items with low teacher confidence
         if (
             stream_item.target == 1.0
@@ -298,11 +318,13 @@ class TeacherConfidenceGate(FilterPolicy):
             self.count_gated += 1
             action = "store" if self.store_gated else "skip"
             self.selection_tracker.record(action, stream_item.target)
-            return action
+            return (action, None)
 
         # Otherwise, delegate to inner policy
         self.count_passed += 1
-        return self.inner_policy.select_action(stream_item, model, criterion, device)
+        return self.inner_policy.select_action(
+            stream_item, model, criterion, device
+        )
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.count_gated + self.count_passed
@@ -381,10 +403,10 @@ class NoFilterPolicy(FilterPolicy):
         model: nn.Module,
         criterion: nn.Module,
         device: torch.device,
-    ) -> Action:
+    ) -> FilterResult:
         self.count_train += 1
         self.selection_tracker.record("train", stream_item.target)
-        return "train"
+        return ("train", None)
 
     def get_stats(self) -> Dict[str, Any]:
         return {
@@ -475,11 +497,14 @@ class DifficultyBasedPolicy(FilterPolicy):
         model: nn.Module,
         criterion: nn.Module,
         device: torch.device,
-    ) -> Action:
+    ) -> FilterResult:
         self.items_seen += 1
 
-        # Compute loss (requires forward pass)
-        loss_value = _compute_item_loss(stream_item, model, criterion, device)
+        # Compute loss with grad so training loop can reuse it when we select train
+        loss = _compute_item_loss_tensor(
+            stream_item, model, criterion, device
+        )
+        loss_value = loss.item()
         self.total_loss += loss_value
         self.loss_history.append(loss_value)
 
@@ -487,7 +512,7 @@ class DifficultyBasedPolicy(FilterPolicy):
         if self.adaptive and self.items_seen <= self.warmup_items:
             self.count_train += 1
             self.selection_tracker.record("train", stream_item.target, loss_value)
-            return "train"
+            return ("train", loss)
 
         # Determine threshold
         if self.adaptive:
@@ -499,15 +524,17 @@ class DifficultyBasedPolicy(FilterPolicy):
         if loss_value > threshold:
             self.count_train += 1
             self.selection_tracker.record("train", stream_item.target, loss_value)
-            return "train"
+            return ("train", loss)
         else:
             if self.store_skipped:
                 self.count_store += 1
-                self.selection_tracker.record("store", stream_item.target, loss_value)
-                return "store"
+                self.selection_tracker.record(
+                    "store", stream_item.target, loss_value
+                )
+                return ("store", None)
             self.count_skip += 1
             self.selection_tracker.record("skip", stream_item.target, loss_value)
-            return "skip"
+            return ("skip", None)
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.count_train + self.count_store + self.count_skip
@@ -574,11 +601,14 @@ class TopKPolicy(FilterPolicy):
         model: nn.Module,
         criterion: nn.Module,
         device: torch.device,
-    ) -> Action:
+    ) -> FilterResult:
         self.items_seen += 1
 
-        # Compute loss
-        loss_value = _compute_item_loss(stream_item, model, criterion, device)
+        # Compute loss with grad so training loop can reuse it when we select train
+        loss = _compute_item_loss_tensor(
+            stream_item, model, criterion, device
+        )
+        loss_value = loss.item()
 
         # Add to window
         self.loss_window.append(loss_value)
@@ -586,8 +616,10 @@ class TopKPolicy(FilterPolicy):
         # During initial fill, train on everything
         if len(self.loss_window) < self.window_size:
             self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return "train"
+            self.selection_tracker.record(
+                "train", stream_item.target, loss_value
+            )
+            return ("train", loss)
 
         # Check if current loss is >= the K-th highest loss in window
         sorted_losses = sorted(self.loss_window, reverse=True)
@@ -595,12 +627,14 @@ class TopKPolicy(FilterPolicy):
 
         if loss_value >= kth_loss:
             self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return "train"
+            self.selection_tracker.record(
+                "train", stream_item.target, loss_value
+            )
+            return ("train", loss)
         else:
             self.count_skip += 1
             self.selection_tracker.record("skip", stream_item.target, loss_value)
-            return "skip"
+            return ("skip", None)
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.count_train + self.count_skip

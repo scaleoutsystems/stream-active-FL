@@ -124,6 +124,7 @@ def perform_classification_update(
     device: torch.device,
     replay_weight: float = 0.5,
     accumulation_steps: int = 1,
+    loss_current: Optional[torch.Tensor] = None,
 ) -> float:
     """
     Compute classification loss and accumulate gradients (backward pass only).
@@ -136,6 +137,10 @@ def perform_classification_update(
     combines them with explicit weighting. This prevents the replay batch
     (typically 32 samples) from drowning out the current item's gradient.
 
+    When loss_current is provided (e.g. from a filter policy that already
+    ran a forward for the current item), that loss is reused and no second
+    forward is done for the current item.
+
     Args:
         model: The classifier.
         criterion: Loss function (e.g. BCEWithLogitsLoss).
@@ -147,16 +152,20 @@ def perform_classification_update(
             1 - replay_weight.  Default 0.5 gives equal weight.
         accumulation_steps: Divides loss by this value so accumulated
             gradient magnitude matches a single-step update.
+        loss_current: Optional precomputed loss tensor for the current
+            item (e.g. from filter policy). When set, no forward is done
+            for the current item.
 
     Returns:
         Unscaled combined loss value (for logging).
     """
     model.train()
 
-    image = image.unsqueeze(0).to(device)
-    target = target.unsqueeze(0).to(device)
-    logits_current = model(image)
-    loss_current = criterion(logits_current, target)
+    if loss_current is None:
+        image_batched = image.unsqueeze(0).to(device)
+        target_batched = target.unsqueeze(0).to(device)
+        logits_current = model(image_batched)
+        loss_current = criterion(logits_current, target_batched)
 
     if replay_batch is not None:
         replay_images = replay_batch["image"].to(device)
@@ -180,6 +189,7 @@ def perform_detection_update(
     device: torch.device,
     replay_weight: float = 0.5,
     accumulation_steps: int = 1,
+    loss_current: Optional[torch.Tensor] = None,
 ) -> float:
     """
     Compute detection loss and accumulate gradients (backward pass only).
@@ -187,6 +197,10 @@ def perform_detection_update(
     The detection model computes its own loss internally (classification +
     bbox regression + centerness). Current item and replay batch get
     separate forward passes with explicit weighting.
+
+    When loss_current is provided (e.g. from a filter policy that already
+    ran a forward for the current item), that loss is reused and no second
+    forward is done for the current item.
 
     Args:
         model: Detection model (e.g. FCOS).
@@ -196,19 +210,23 @@ def perform_detection_update(
         replay_weight: Weight for replay loss.  Current gets
             1 - replay_weight.
         accumulation_steps: Divides loss by this value for accumulation.
+        loss_current: Optional precomputed loss tensor for the current
+            item (e.g. from filter policy). When set, no forward is done
+            for the current item.
 
     Returns:
         Unscaled combined loss value (for logging).
     """
     model.train()
 
-    image = stream_item.image.to(device)
-    target = {
-        "boxes": stream_item.annotations["boxes"].to(device),
-        "labels": stream_item.annotations["labels"].to(device),
-    }
-    loss_dict = model([image], [target])
-    loss_current = sum(loss_dict.values())
+    if loss_current is None:
+        image = stream_item.image.to(device)
+        target = {
+            "boxes": stream_item.annotations["boxes"].to(device),
+            "labels": stream_item.annotations["labels"].to(device),
+        }
+        loss_dict = model([image], [target])
+        loss_current = sum(loss_dict.values())
 
     if replay_batch is not None:
         replay_images = [img.to(device) for img in replay_batch["images"]]
@@ -340,7 +358,9 @@ def train_on_classification_stream(
         if running_pos_weight is not None:
             running_pos_weight.update(stream_item.target)
 
-        action = filter_policy.select_action(stream_item, model, criterion, device)
+        action, precomputed_loss = filter_policy.select_action(
+            stream_item, model, criterion, device
+        )
 
         if metrics_logger is not None:
             forward_pass = (action == "train") or filter_computes_forward
@@ -360,6 +380,7 @@ def train_on_classification_stream(
                 device,
                 replay_weight=replay_weight,
                 accumulation_steps=accumulation_steps,
+                loss_current=precomputed_loss,
             )
 
             train_count += 1
@@ -484,7 +505,9 @@ def train_on_detection_stream(
 
         items_processed += 1
 
-        action = filter_policy.select_action(stream_item, model, criterion, device)
+        action, precomputed_loss = filter_policy.select_action(
+            stream_item, model, criterion, device
+        )
 
         if metrics_logger is not None:
             forward_pass = (action == "train") or filter_computes_forward
@@ -502,6 +525,7 @@ def train_on_detection_stream(
                 device,
                 replay_weight=replay_weight,
                 accumulation_steps=accumulation_steps,
+                loss_current=precomputed_loss,
             )
 
             train_count += 1
