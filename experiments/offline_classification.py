@@ -5,7 +5,7 @@ Trains a binary classifier on the full ZOD dataset (shuffled, multi-epoch)
 to establish an upper-bound baseline for comparison with streaming methods.
 
 Usage:
-    python experiments/offline_classification.py --config configs/offline_classification.yaml
+    python experiments/offline_classification.py --config configs/classification/offline.yaml
 """
 
 from __future__ import annotations
@@ -393,7 +393,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/offline_classification.yaml",
+        default="configs/classification/offline.yaml",
         help="Path to config YAML file",
     )
     args = parser.parse_args()

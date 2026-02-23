@@ -5,7 +5,7 @@ Trains an FCOS detector on ZOD sequences in strict temporal order with optional
 filtering and replay. Parallel to streaming_classification.py but for detection.
 
 Usage:
-    python experiments/streaming_detection.py --config configs/streaming_detection_no_filter.yaml
+    python experiments/streaming_detection.py --config configs/detection/streaming_no_filter.yaml
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class StreamingDetectionConfig:
     color_jitter: bool = True
 
     # Filtering policy
-    filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    filter_policy: Literal["none", "difficulty", "topk", "gradient_norm"] = "none"
 
     # Teacher confidence gate (applied before any filter policy)
     tau_teacher: float = 0.0
@@ -95,6 +95,10 @@ class StreamingDetectionConfig:
     # TopK policy parameters
     topk_window_size: int = 100
     topk_k: int = 30
+
+    # GradientNorm policy parameters
+    grad_norm_window_size: int = 500
+    tau_grad_norm: float = 0.0
 
     # Replay buffer
     use_replay: bool = False
@@ -227,6 +231,12 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             print(f"  Mode: fixed (tau_loss={config.tau_loss})")
     elif config.filter_policy == "topk":
         print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}")
+    elif config.filter_policy == "gradient_norm":
+        if config.adaptive:
+            print(f"  Mode: adaptive (train_fraction={config.train_fraction})")
+            print(f"  Norm window: {config.grad_norm_window_size}, warmup: {config.warmup_items}")
+        else:
+            print(f"  Mode: fixed (tau_grad_norm={config.tau_grad_norm})")
     if config.tau_teacher > 0.0:
         print(f"  Teacher confidence gate: tau_teacher={config.tau_teacher}")
 

@@ -39,8 +39,8 @@ filter_policy: "none"
 
 # Replay buffer (per-client, persists across rounds)
 use_replay: true
-replay_capacity: 2000
-replay_batch_size: 32
+replay_capacity: 500
+replay_batch_size: 8
 replay_admission_policy: "reservoir"
 replay_weight: 0.5
 

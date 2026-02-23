@@ -1,0 +1,43 @@
+# Offline detection baseline experiment configuration
+# Full dataset, shuffled, multi-epoch training with FCOS detector
+# Establishes the upper-bound detection mAP for streaming comparison
+
+# Paths
+dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
+annotations_dir: "data/annotations_640x360"
+output_dir: "outputs/offline_detection"
+
+# Dataset
+min_score: 0.5
+min_box_area: 64
+subsample_steps: 5
+
+# Model (FCOS with ResNet50-FPN)
+num_classes: 4            # 3 categories + background
+trainable_backbone_layers: 1
+image_min_size: 360
+image_max_size: 640
+pretrained_backbone: true
+
+# Training
+batch_size: 4
+num_workers: 4
+epochs: 24
+learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+max_grad_norm: 1.0
+
+# Augmentation
+augment: true
+hflip_prob: 0.5
+color_jitter: true
+
+# Evaluation
+eval_every_n_epochs: 1
+score_threshold: 0.3
+
+# Reproducibility
+seed: 42
+
+# Device
+device: "cuda"

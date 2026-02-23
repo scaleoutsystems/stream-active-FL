@@ -10,7 +10,7 @@ Parallel to streaming_classification.py but with federated rounds instead
 of a single-pass stream.
 
 Usage:
-    python experiments/federated_streaming_classification.py --config configs/federated_streaming_classification.yaml
+    python experiments/federated_streaming_classification.py --config configs/classification/federated_streaming.yaml
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ class FederatedStreamingClassificationConfig:
     pos_weight: str | float = "running"
 
     # Filtering policy (each client gets its own instance)
-    filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    filter_policy: Literal["none", "difficulty", "topk", "gradient_norm"] = "none"
     tau_teacher: float = 0.0
     store_gated: bool = False
     adaptive: bool = True
@@ -100,6 +100,8 @@ class FederatedStreamingClassificationConfig:
     store_skipped: bool = False
     topk_window_size: int = 100
     topk_k: int = 30
+    grad_norm_window_size: int = 500
+    tau_grad_norm: float = 0.0
 
     # Replay buffer (per-client, persists across rounds)
     use_replay: bool = True

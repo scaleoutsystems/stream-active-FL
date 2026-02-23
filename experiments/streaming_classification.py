@@ -5,8 +5,8 @@ Trains a classifier on ZOD sequences in strict temporal order with optional
 filtering and replay. This is the core streaming learning pipeline.
 
 Usage:
-    python experiments/streaming_classification.py --config configs/streaming_classification_no_filter.yaml
-    python experiments/streaming_classification.py --config configs/streaming_classification_difficulty_adaptive.yaml
+    python experiments/streaming_classification.py --config configs/classification/streaming_no_filter.yaml
+    python experiments/streaming_classification.py --config configs/classification/streaming_difficulty_adaptive.yaml
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ class StreamingClassificationConfig:
     pos_weight: str | float = "running"
 
     # Filtering policy
-    filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    filter_policy: Literal["none", "difficulty", "topk", "gradient_norm"] = "none"
     
     # Teacher confidence gate (applied before any filter policy)
     tau_teacher: float = 0.0
@@ -94,6 +94,10 @@ class StreamingClassificationConfig:
     # TopK policy parameters
     topk_window_size: int = 100
     topk_k: int = 30
+
+    # GradientNorm policy parameters
+    grad_norm_window_size: int = 500
+    tau_grad_norm: float = 0.0
 
     # Replay buffer
     use_replay: bool = False
@@ -225,6 +229,12 @@ def main(config: StreamingClassificationConfig, config_path: Path, command: str)
             print(f"  Mode: fixed (tau_loss={config.tau_loss})")
     elif config.filter_policy == "topk":
         print(f"  window_size: {config.topk_window_size}, k: {config.topk_k}")
+    elif config.filter_policy == "gradient_norm":
+        if config.adaptive:
+            print(f"  Mode: adaptive (train_fraction={config.train_fraction})")
+            print(f"  Norm window: {config.grad_norm_window_size}, warmup: {config.warmup_items}")
+        else:
+            print(f"  Mode: fixed (tau_grad_norm={config.tau_grad_norm})")
     if config.tau_teacher > 0.0:
         print(f"  Teacher confidence gate: tau_teacher={config.tau_teacher} (positive items only)")
 

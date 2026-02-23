@@ -5,7 +5,7 @@ Trains an FCOS detector on the full ZOD dataset (shuffled, multi-epoch)
 to establish an upper-bound baseline for comparison with streaming methods.
 
 Usage:
-    python experiments/offline_detection.py --config configs/offline_detection.yaml
+    python experiments/offline_detection.py --config configs/detection/offline.yaml
 """
 
 from __future__ import annotations
@@ -373,7 +373,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/offline_detection.yaml",
+        default="configs/detection/offline.yaml",
         help="Path to config YAML file",
     )
     args = parser.parse_args()

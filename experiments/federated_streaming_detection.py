@@ -10,7 +10,7 @@ Parallel to streaming_detection.py but with federated rounds instead of a
 single-pass stream.
 
 Usage:
-    python experiments/federated_streaming_detection.py --config configs/federated_streaming_detection.yaml
+    python experiments/federated_streaming_detection.py --config configs/detection/federated_streaming.yaml
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ class FederatedStreamingDetectionConfig:
     accumulation_steps: int = 1
 
     # Filtering policy (each client gets its own instance)
-    filter_policy: Literal["none", "difficulty", "topk"] = "none"
+    filter_policy: Literal["none", "difficulty", "topk", "gradient_norm"] = "none"
     tau_teacher: float = 0.0
     store_gated: bool = False
     adaptive: bool = True
@@ -107,6 +107,8 @@ class FederatedStreamingDetectionConfig:
     store_skipped: bool = False
     topk_window_size: int = 100
     topk_k: int = 30
+    grad_norm_window_size: int = 500
+    tau_grad_norm: float = 0.0
 
     # Replay buffer (per-client, persists across rounds)
     use_replay: bool = True

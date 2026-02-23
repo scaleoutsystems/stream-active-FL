@@ -9,14 +9,15 @@ Available policies:
 - DifficultyBasedPolicy: Train on high-loss items, with optional adaptive
   thresholding (percentile-based)
 - TopKPolicy: Train on top-K hardest items in a sliding window
+- GradientNormPolicy: Train on items with largest parameter gradient norms
 
 All policies can be wrapped with TeacherConfidenceGate to additionally
 filter out positive items with low-confidence pseudo-labels.
 
-When a policy that computes loss (e.g. DifficultyBasedPolicy, TopKPolicy)
-selects "train", it may return the loss tensor from its forward pass so the
-training loop can reuse it for the backward step, avoiding a second forward
-for the same item.
+When a policy that computes loss (e.g. DifficultyBasedPolicy, TopKPolicy,
+GradientNormPolicy) selects "train", it may return the loss tensor from its
+forward pass so the training loop can reuse it for the backward step,
+avoiding a second forward for the same item.
 """
 
 from __future__ import annotations
@@ -262,6 +263,33 @@ def _compute_item_loss_tensor(
     return _compute_classification_item_loss_tensor(
         stream_item, model, criterion, device
     )
+
+
+def _compute_gradient_norm(loss: torch.Tensor, model: nn.Module) -> float:
+    """
+    Compute the L2 norm of parameter gradients for a given loss.
+
+    Uses torch.autograd.grad with retain_graph=True so the loss tensor's
+    computation graph remains intact for a subsequent backward pass in the
+    training loop. Does not populate .grad attributes on parameters, so
+    gradient accumulation across stream items is unaffected.
+
+    Args:
+        loss: Scalar loss tensor with a computation graph.
+        model: Model whose trainable parameters to compute gradients for.
+
+    Returns:
+        L2 norm of the concatenated parameter gradient vector.
+    """
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    grads = torch.autograd.grad(
+        loss, trainable_params, retain_graph=True, allow_unused=True,
+    )
+    total = 0.0
+    for g in grads:
+        if g is not None:
+            total += g.pow(2).sum().item()
+    return total ** 0.5
 
 
 # =============================================================================
@@ -646,3 +674,144 @@ class TopKPolicy(FilterPolicy):
             "window_size": self.window_size,
             "k": self.k,
         }
+
+
+# =============================================================================
+# GradientNormPolicy
+# =============================================================================
+
+
+class GradientNormPolicy(FilterPolicy):
+    """
+    Gradient-norm selective training policy.
+
+    Computes the L2 norm of per-sample parameter gradients as an importance
+    score and selects items with the highest norms for training. Gradient
+    norm captures how much a sample would move the model parameters, which
+    can differ from loss (e.g. high loss on a flat region produces small
+    gradients while moderate loss on a steep region produces large ones).
+
+    Uses torch.autograd.grad with retain_graph=True so the loss tensor's
+    computation graph is preserved for the training loop's backward pass,
+    avoiding a redundant forward. The autograd.grad call does not populate
+    parameter .grad attributes, so gradient accumulation is unaffected.
+
+    Supports the same adaptive (percentile-based) and fixed thresholding
+    modes as DifficultyBasedPolicy.
+
+    Args:
+        adaptive: If True, use percentile-based adaptive thresholding.
+        train_fraction: Fraction of items to train on (only if adaptive).
+            E.g. 0.3 means train on the ~30% highest-norm items.
+        norm_window_size: Size of the sliding window for gradient norm
+            history (only if adaptive).
+        warmup_items: Number of items to train on unconditionally before
+            applying the adaptive threshold, to build up a norm distribution.
+        tau_norm: Absolute gradient norm threshold (only if not adaptive).
+        store_skipped: If True, skipped items get action "store" instead
+            of "skip".
+    """
+
+    def __init__(
+        self,
+        adaptive: bool = True,
+        train_fraction: float = 0.3,
+        norm_window_size: int = 500,
+        warmup_items: int = 200,
+        tau_norm: float = 0.0,
+        store_skipped: bool = False,
+    ):
+        super().__init__()
+        self.adaptive = adaptive
+        self.train_fraction = train_fraction
+        self.norm_window_size = norm_window_size
+        self.warmup_items = warmup_items
+        self.tau_norm = tau_norm
+        self.store_skipped = store_skipped
+
+        self.norm_history: deque = deque(maxlen=norm_window_size)
+
+        self.count_train = 0
+        self.count_store = 0
+        self.count_skip = 0
+        self.items_seen = 0
+        self.total_norm = 0.0
+
+    def _get_adaptive_threshold(self) -> float:
+        """
+        Compute the adaptive gradient norm threshold from norm history.
+
+        Returns the (1 - train_fraction) percentile of recent norms.
+        E.g. if train_fraction=0.3, returns the 70th percentile, so items
+        with norm above this value (top 30%) will be trained on.
+        """
+        if len(self.norm_history) == 0:
+            return 0.0
+
+        sorted_norms = sorted(self.norm_history)
+        percentile_idx = int(len(sorted_norms) * (1.0 - self.train_fraction))
+        percentile_idx = min(percentile_idx, len(sorted_norms) - 1)
+        return sorted_norms[percentile_idx]
+
+    def select_action(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        criterion: nn.Module,
+        device: torch.device,
+    ) -> FilterResult:
+        self.items_seen += 1
+
+        loss = _compute_item_loss_tensor(
+            stream_item, model, criterion, device
+        )
+        loss_value = loss.item()
+
+        grad_norm = _compute_gradient_norm(loss, model)
+        self.total_norm += grad_norm
+        self.norm_history.append(grad_norm)
+
+        if self.adaptive and self.items_seen <= self.warmup_items:
+            self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
+            return ("train", loss)
+
+        threshold = self._get_adaptive_threshold() if self.adaptive else self.tau_norm
+
+        if grad_norm > threshold:
+            self.count_train += 1
+            self.selection_tracker.record("train", stream_item.target, loss_value)
+            return ("train", loss)
+        else:
+            if self.store_skipped:
+                self.count_store += 1
+                self.selection_tracker.record(
+                    "store", stream_item.target, loss_value
+                )
+                return ("store", None)
+            self.count_skip += 1
+            self.selection_tracker.record("skip", stream_item.target, loss_value)
+            return ("skip", None)
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self.count_train + self.count_store + self.count_skip
+        avg_norm = self.total_norm / max(self.items_seen, 1)
+
+        stats: Dict[str, Any] = {
+            "count_train": self.count_train,
+            "count_store": self.count_store,
+            "count_skip": self.count_skip,
+            "train_rate": self.count_train / max(total, 1),
+            "avg_grad_norm": avg_norm,
+            "items_seen": self.items_seen,
+            "adaptive": self.adaptive,
+        }
+
+        if self.adaptive:
+            stats["train_fraction"] = self.train_fraction
+            stats["current_threshold"] = self._get_adaptive_threshold()
+            stats["norm_window_size"] = len(self.norm_history)
+        else:
+            stats["tau_norm"] = self.tau_norm
+
+        return stats

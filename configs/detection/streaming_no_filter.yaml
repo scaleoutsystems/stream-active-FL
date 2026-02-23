@@ -1,39 +1,48 @@
-# Offline detection baseline experiment configuration
-# Full dataset, shuffled, multi-epoch training with FCOS detector
-# Establishes the upper-bound detection mAP for streaming comparison
+# Streaming detection baseline: no filtering (train on every item)
+# Establishes the streaming detection baseline with replay
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/offline_detection"
+output_dir: "outputs/streaming_detection_no_filter"
 
 # Dataset
 min_score: 0.5
-min_box_area: 128
+min_box_area: 64
 subsample_steps: 5
 
-# Model (FCOS with ResNet50-FPN)
-num_classes: 4            # 3 categories + background
+# Model
+num_classes: 4
 trainable_backbone_layers: 0
 image_min_size: 360
 image_max_size: 640
 pretrained_backbone: true
+load_checkpoint: null
 
 # Training
-batch_size: 4
-num_workers: 4
-epochs: 24
 learning_rate: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
+accumulation_steps: 1
 
 # Augmentation
 augment: true
 hflip_prob: 0.5
 color_jitter: true
 
+# Filtering
+filter_policy: "none"
+
+# Replay buffer
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 16
+replay_admission_policy: "reservoir"
+replay_weight: 0.5
+
 # Evaluation
-eval_every_n_epochs: 1
+eval_every_n_items: 5000
+checkpoint_interval: 1000
 score_threshold: 0.3
 
 # Reproducibility

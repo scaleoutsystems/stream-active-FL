@@ -9,7 +9,7 @@ output_dir: "outputs/federated_streaming_detection"
 
 # Dataset
 min_score: 0.5
-min_box_area: 128
+min_box_area: 64
 subsample_steps: 5
 
 # Model (FCOS with ResNet50-FPN, frozen backbone)
@@ -42,8 +42,8 @@ filter_policy: "none"
 
 # Replay buffer (per-client, persists across rounds)
 use_replay: true
-replay_capacity: 2000
-replay_batch_size: 16
+replay_capacity: 500
+replay_batch_size: 8
 replay_admission_policy: "reservoir"
 replay_weight: 0.5
 

@@ -1,14 +1,14 @@
-# Streaming detection baseline: no filtering, no replay
-# Pure single-pass streaming (lower bound)
+# Streaming detection with adaptive difficulty-based filtering
+# Trains on the top 30% hardest items (by loss)
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/streaming_detection_no_filter_no_replay"
+output_dir: "outputs/streaming_detection_difficulty_adaptive"
 
 # Dataset
 min_score: 0.5
-min_box_area: 128
+min_box_area: 64
 subsample_steps: 5
 
 # Model
@@ -31,10 +31,19 @@ hflip_prob: 0.5
 color_jitter: true
 
 # Filtering
-filter_policy: "none"
+filter_policy: "difficulty"
+adaptive: true
+train_fraction: 0.3
+loss_window_size: 500
+warmup_items: 200
+store_skipped: false
 
 # Replay buffer
-use_replay: false
+use_replay: true
+replay_capacity: 2000
+replay_batch_size: 16
+replay_admission_policy: "reservoir"
+replay_weight: 0.5
 
 # Evaluation
 eval_every_n_items: 5000

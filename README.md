@@ -8,13 +8,13 @@ From the repo root:
 
 ```bash
 # Offline classification baseline (upper bound)
-python experiments/offline_classification.py --config configs/offline_classification.yaml
+python experiments/offline_classification.py --config configs/classification/offline.yaml
 
 # Streaming classification with replay
-python experiments/streaming_classification.py --config configs/streaming_classification_no_filter.yaml
+python experiments/streaming_classification.py --config configs/classification/streaming_no_filter.yaml
 ```
 
-Detection experiments use `experiments/streaming_detection.py` and `configs/streaming_detection_*.yaml`.
+Detection experiments use `experiments/streaming_detection.py` and `configs/detection/streaming_*.yaml`.
 
 ## Install
 

@@ -1,14 +1,14 @@
-# Streaming detection baseline: no filtering (train on every item)
-# Establishes the streaming detection baseline with replay
+# Streaming detection with gradient-norm-based filtering
+# Trains on the top 30% highest gradient-norm items
 
 # Paths
 dataset_root: "/mnt/pr_2018_scaleout_workdir/ZOD256/ZOD_640x360"
 annotations_dir: "data/annotations_640x360"
-output_dir: "outputs/streaming_detection_no_filter"
+output_dir: "outputs/streaming_detection_gradient_norm"
 
 # Dataset
 min_score: 0.5
-min_box_area: 128
+min_box_area: 64
 subsample_steps: 5
 
 # Model
@@ -31,7 +31,12 @@ hflip_prob: 0.5
 color_jitter: true
 
 # Filtering
-filter_policy: "none"
+filter_policy: "gradient_norm"
+adaptive: true
+train_fraction: 0.3
+grad_norm_window_size: 500
+warmup_items: 200
+store_skipped: false
 
 # Replay buffer
 use_replay: true
