@@ -20,10 +20,6 @@ dev = [
     "black",
     "ruff",
 ]
-labeling = [
-    "opencv-python",
-    "detectron2",
-]
 
 [build-system]
 requires = ["setuptools>=61.0"]

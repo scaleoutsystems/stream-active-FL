@@ -40,8 +40,8 @@ store_skipped: false
 
 # Replay buffer
 use_replay: true
-replay_capacity: 2000
-replay_batch_size: 16
+replay_capacity: 500
+replay_batch_size: 8
 replay_admission_policy: "reservoir"
 replay_weight: 0.5
 

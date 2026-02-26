@@ -231,3 +231,8 @@ tensorboard/
 
 # Generated annotations
 data/annotations_*/
+
+# Other
+nohup.out
+notebooks/
+notes/
