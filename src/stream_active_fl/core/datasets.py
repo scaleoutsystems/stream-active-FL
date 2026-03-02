@@ -1,165 +1,72 @@
 """
-Dataset implementations for offline and streaming learning on ZOD.
+Dataset implementations for offline and streaming object detection.
 
-Offline datasets (for PyTorch DataLoader, shuffled, multi-epoch):
-    ZODClassificationDataset         Binary classification per frame
-    ZODDetectionDataset     Multi-class object detection per frame
+Offline dataset (for PyTorch DataLoader, shuffled, multi-epoch):
+    DetectionDataset    Multi-class object detection per frame
 
-Streaming dataset (iterator-based, strict temporal order):
-    StreamingDataset        Supports both classification and detection tasks
+Streaming dataset (iterator-based, strict chronological order):
+    DetectionStream     Yields StreamItem objects one at a time
 
-Also provides annotation loaders, transforms, augmentations, and collate
-functions used by the experiment scripts.
+Both read preprocessed images and per-frame annotation JSONs produced by
+tools/preprocessing/prepare_data.py, indexed by a manifest JSON file.
+
+Also provides the ZOD category mapping, transforms, augmentations, and
+collate functions used by the experiment scripts.
 """
 
 from __future__ import annotations
 
 import json
 import random
-from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple
 
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms import functional as F
-from zod import ZodSequences
-import zod.constants as constants
 
 from .items import StreamItem
 
 
 # =============================================================================
-# Category definitions (must match annotate.py)
+# Category definitions (ZOD top-level classes)
 # =============================================================================
 
-CATEGORY_ID_TO_NAME: Dict[int, str] = {
-    0: "person",
-    1: "car",
-    2: "traffic_light",
+CATEGORY_NAME_TO_ID: Dict[str, int] = {
+    "Vehicle": 0,
+    "VulnerableVehicle": 1,
+    "Pedestrian": 2,
+    "Animal": 3,
+    "PoleObject": 4,
+    "TrafficSign": 5,
+    "TrafficSignal": 6,
+    "TrafficGuide": 7,
+    "TrafficBeacon": 8,
+    "DynamicBarrier": 9,
 }
 
-CATEGORY_NAME_TO_ID: Dict[str, int] = {v: k for k, v in CATEGORY_ID_TO_NAME.items()}
+CATEGORY_ID_TO_NAME: Dict[int, str] = {v: k for k, v in CATEGORY_NAME_TO_ID.items()}
+
+NUM_CLASSES = len(CATEGORY_NAME_TO_ID) + 1  # +1 for background
 
 
 # =============================================================================
-# Shared annotation helpers
+# Manifest helpers
 # =============================================================================
 
 
-def _read_annotation_json(ann_path: Path) -> Optional[List[Dict[str, Any]]]:
-    """
-    Read a per-sequence annotation JSON and return its annotation list.
-
-    Returns None (instead of raising) when the file is missing or corrupt,
-    so callers can fall back to treating the sequence as unannotated.
-    """
-    if not ann_path.exists():
-        return None
-    try:
-        with ann_path.open("r") as f:
-            data = json.load(f)
-        return data.get("annotations", [])
-    except Exception as e:
-        print(f"Warning: could not read {ann_path}: {e}")
-        return None
+def load_manifest(manifest_path: Path) -> Dict[str, Any]:
+    """Load the preprocessing manifest JSON."""
+    with manifest_path.open("r") as f:
+        return json.load(f)
 
 
-def load_classification_frame_info(
-    ann_path: Path,
-    target_category: int,
-    min_score: float,
-) -> Dict[int, Dict[str, Any]]:
-    """
-    Load per-frame binary classification info for a single category.
-
-    Used by ZODClassificationDataset and StreamingDataset (classification mode).
-
-    Args:
-        ann_path: Path to per-sequence annotation JSON.
-        target_category: Category ID to treat as the positive class.
-        min_score: Minimum detection score to count as a valid detection.
-
-    Returns:
-        Dict mapping frame_idx -> {
-            "has_target": bool,
-            "max_score": float (max detection score, 0 if none),
-        }
-        Only frames with qualifying detections are included; absent frame
-        indices should be treated as negative (has_target=False, max_score=0).
-    """
-    annotations = _read_annotation_json(ann_path)
-    if annotations is None:
-        return {}
-
-    frame_detections: Dict[int, List[float]] = defaultdict(list)
-    for ann in annotations:
-        if ann.get("category_id") != target_category:
-            continue
-        score = float(ann.get("score", 1.0))
-        if score < min_score:
-            continue
-        frame_detections[ann["frame_idx"]].append(score)
-
-    return {
-        frame_idx: {"has_target": True, "max_score": max(scores)}
-        for frame_idx, scores in frame_detections.items()
-    }
-
-
-def load_detection_frame_info(
-    ann_path: Path,
-    min_score: float,
-    min_box_area: float = 0.0,
-) -> Dict[int, Dict[str, Any]]:
-    """
-    Load per-frame detection annotations for all categories.
-
-    Used by ZODDetectionDataset and StreamingDataset (detection mode).
-
-    Args:
-        ann_path: Path to per-sequence annotation JSON.
-        min_score: Minimum detection score to include.
-        min_box_area: Minimum bounding box area (width * height) to include.
-            Boxes smaller than this are silently dropped. Useful for filtering
-            tiny pseudo-labels that are below the detector's effective resolution.
-
-    Returns:
-        Dict mapping frame_idx -> {
-            "has_target": True,
-            "max_score": float,
-            "annotations": list of {"bbox": [x,y,w,h], "category_id": int, "score": float},
-        }
-        Only frames with qualifying detections are included.
-    """
-    annotations = _read_annotation_json(ann_path)
-    if annotations is None:
-        return {}
-
-    frame_annotations: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    for ann in annotations:
-        score = float(ann.get("score", 1.0))
-        if score < min_score:
-            continue
-        x, y, w, h = ann["bbox"]
-        if w * h < min_box_area:
-            continue
-        frame_annotations[ann["frame_idx"]].append({
-            "bbox": ann["bbox"],
-            "category_id": ann["category_id"],
-            "score": score,
-        })
-
-    return {
-        frame_idx: {
-            "has_target": True,
-            "max_score": max(a["score"] for a in anns),
-            "annotations": anns,
-        }
-        for frame_idx, anns in frame_annotations.items()
-    }
+def _load_annotation(ann_path: Path) -> Dict[str, Any]:
+    """Load a per-frame annotation JSON."""
+    with ann_path.open("r") as f:
+        return json.load(f)
 
 
 def format_detection_annotations(
@@ -168,11 +75,8 @@ def format_detection_annotations(
     """
     Convert raw annotation list to torchvision-format detection target.
 
-    Converts bboxes from [x, y, w, h] to [x1, y1, x2, y2] and shifts
-    category IDs by +1 (torchvision reserves 0 for background).
-
-    Returns:
-        {"boxes": FloatTensor[N, 4], "labels": Int64Tensor[N]}
+    Bounding boxes are already in [x1, y1, x2, y2] format from preprocessing.
+    Category IDs are shifted by +1 (torchvision reserves 0 for background).
     """
     if not raw_anns:
         return {
@@ -183,8 +87,7 @@ def format_detection_annotations(
     boxes = []
     labels = []
     for ann in raw_anns:
-        x, y, w, h = ann["bbox"]
-        boxes.append([x, y, x + w, y + h])
+        boxes.append(ann["bbox_xyxy"])
         labels.append(ann["category_id"] + 1)
 
     return {
@@ -193,37 +96,33 @@ def format_detection_annotations(
     }
 
 
+def filter_small_boxes(
+    target: Dict[str, torch.Tensor],
+    min_box_area: float,
+) -> Dict[str, torch.Tensor]:
+    """Drop boxes smaller than min_box_area from a detection target."""
+    if min_box_area <= 0:
+        return target
+
+    boxes = target["boxes"]
+    labels = target["labels"]
+    if boxes.numel() == 0:
+        return target
+
+    widths = boxes[:, 2] - boxes[:, 0]
+    heights = boxes[:, 3] - boxes[:, 1]
+    areas = widths * heights
+
+    keep = (widths > 0) & (heights > 0) & (areas >= min_box_area)
+    return {
+        "boxes": boxes[keep],
+        "labels": labels[keep],
+    }
+
+
 # =============================================================================
 # Default image transforms
 # =============================================================================
-
-def get_classification_transforms(
-    image_size: Tuple[int, int] = (224, 224),
-) -> Tuple[transforms.Compose, transforms.Compose]:
-    """
-    Returns (train_transform, val_transform) for classification.
-
-    Both are identical and deterministic (no augmentation). Kept separate
-    so train-only augmentation can be added later without changing callers.
-    """
-    normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-    )
-
-    train_transform = transforms.Compose([
-        transforms.Resize(image_size),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    val_transform = transforms.Compose([
-        transforms.Resize(image_size),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    return train_transform, val_transform
 
 
 def get_detection_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
@@ -256,14 +155,6 @@ class DetectionAugmentation:
     Operates on (PIL Image, target dict) pairs, where the target dict
     contains "boxes" (FloatTensor[N, 4] in xyxy format) and "labels".
     Must be applied BEFORE ToTensor conversion.
-
-    Args:
-        hflip_prob: Probability of applying horizontal flip.
-        color_jitter: Whether to apply random color jitter.
-        brightness: Max brightness jitter factor.
-        contrast: Max contrast jitter factor.
-        saturation: Max saturation jitter factor.
-        hue: Max hue jitter factor.
     """
 
     def __init__(
@@ -292,27 +183,14 @@ class DetectionAugmentation:
         image: Image.Image,
         target: Dict[str, torch.Tensor],
     ) -> Tuple[Image.Image, Dict[str, torch.Tensor]]:
-        """
-        Apply augmentations to an image and its detection target.
-
-        Args:
-            image: PIL Image.
-            target: Dict with "boxes" (FloatTensor[N, 4] xyxy) and "labels".
-
-        Returns:
-            Augmented (image, target) pair.
-        """
-        # Photometric: color jitter (image only, doesn't affect boxes)
         if self.color_jitter_transform is not None:
             image = self.color_jitter_transform(image)
 
-        # Spatial: random horizontal flip (affects both image and boxes)
         if random.random() < self.hflip_prob:
             image = F.hflip(image)
             boxes = target["boxes"]
             if len(boxes) > 0:
                 width = image.width
-                # [x1, y1, x2, y2] -> flip x coordinates
                 new_boxes = boxes.clone()
                 new_boxes[:, 0] = width - boxes[:, 2]
                 new_boxes[:, 2] = width - boxes[:, 0]
@@ -333,341 +211,253 @@ def get_detection_augmentation(
 
 
 # =============================================================================
-# ZODClassificationDataset (Offline, Classification)
+# DetectionDataset (Offline — bootstrap training and validation)
 # =============================================================================
 
-class ZODClassificationDataset(Dataset):
-    """
-    PyTorch Dataset for frame-level binary classification on ZOD sequences.
 
-    Each sample is a single frame. The binary target indicates whether the frame
-    contains at least one detection of `target_category` (with score >= min_score).
+class DetectionDataset(Dataset):
+    """
+    PyTorch Dataset for offline multi-class object detection.
+
+    Reads preprocessed images and annotation JSONs from disk, indexed by
+    a manifest file produced by prepare_data.py.  Suitable for DataLoader
+    with shuffle for multi-epoch bootstrap training or validation.
 
     Args:
-        dataset_root: Path to ZOD dataset (e.g. ZOD256/ZOD_640x360 or ZODCropped_2840x1600).
-        annotations_dir: Path to directory with per-sequence annotation JSONs.
-        version: ZOD version, "full" or "mini".
-        split: "train", "val", or None (use all sequences).
-        transform: Torchvision transform to apply to images.
-        target_category: Category ID (0=person, 1=car, 2=traffic_light) to use
-            for the binary target. Frame is positive if it has >= 1 detection
-            of this category.
-        min_score: Minimum detection score to count as a valid detection.
-            Detections below this threshold are ignored when computing the target.
-        subsample_steps: Use every Nth frame (1 = all frames, 5 = every 5th).
-        verbose: Print dataset statistics after loading.
-
-    Item format:
-        {
-            "image": Tensor (C, H, W) after transform,
-            "target": Tensor scalar (0.0 or 1.0),
-            "score": float, max detection score for target_category in this frame
-                     (0.0 if no detections),
-            "metadata": {
-                "seq_idx": int,
-                "seq_id": str,
-                "frame_idx": int,
-            },
-        }
-    """
-
-    def __init__(
-        self,
-        dataset_root: str | Path,
-        annotations_dir: str | Path,
-        version: Literal["full", "mini"] = "full",
-        split: Optional[Literal["train", "val"]] = None,
-        transform: Optional[Callable] = None,
-        target_category: int = 0,
-        min_score: float = 0.0,
-        subsample_steps: int = 1,
-        verbose: bool = True,
-    ):
-        self.dataset_root = Path(dataset_root)
-        self.annotations_dir = Path(annotations_dir)
-        self.version = version
-        self.split = split
-        self.transform = transform
-        self.target_category = target_category
-        self.min_score = min_score
-        self.subsample_steps = subsample_steps
-
-        # Load ZOD sequences
-        zod_sequences = ZodSequences(str(self.dataset_root), version)
-
-        # Filter by split if requested
-        if split == "train":
-            sequence_ids = zod_sequences.get_split(constants.TRAIN)
-            self.sequences = [zod_sequences[seq_id] for seq_id in sequence_ids]
-        elif split == "val":
-            sequence_ids = zod_sequences.get_split(constants.VAL)
-            self.sequences = [zod_sequences[seq_id] for seq_id in sequence_ids]
-        else:
-            self.sequences = list(zod_sequences)
-
-        # Build sample index
-        # samples: list of (seq_idx, frame_idx, target, max_score)
-        # sequence_map: seq_idx -> (seq_id, frames_list)
-        self.samples: List[Tuple[int, int, float, float]] = []
-        self.sequence_map: Dict[int, Tuple[str, Any]] = {}
-
-        for seq_idx, sequence in enumerate(self.sequences):
-            seq_id = sequence.info.id
-            frames = sequence.info.get_camera_frames()
-
-            self.sequence_map[seq_idx] = (seq_id, frames)
-
-            # Load annotation JSON for this sequence
-            ann_path = self.annotations_dir / f"{seq_id}.json"
-            frame_info = self._load_frame_info(ann_path)
-
-            # Create samples for each (subsampled) frame
-            for frame_idx in range(0, len(frames), self.subsample_steps):
-                info = frame_info.get(frame_idx, {"has_target": False, "max_score": 0.0})
-                target = 1.0 if info["has_target"] else 0.0
-                max_score = info["max_score"]
-                self.samples.append((seq_idx, frame_idx, target, max_score))
-
-        if verbose:
-            self._print_summary()
-
-    def _load_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
-        """Load per-frame classification info (delegates to module-level helper)."""
-        return load_classification_frame_info(ann_path, self.target_category, self.min_score)
-
-    def _print_summary(self) -> None:
-        """Print dataset statistics."""
-        num_positive = sum(1 for _, _, t, _ in self.samples if t == 1.0)
-        num_negative = len(self.samples) - num_positive
-        total = len(self.samples)
-
-        cat_name = CATEGORY_ID_TO_NAME.get(self.target_category, str(self.target_category))
-
-        print()
-        print("=" * 60)
-        print("ZODClassificationDataset Summary")
-        print("=" * 60)
-        print(f"  Dataset root     : {self.dataset_root}")
-        print(f"  Annotations dir  : {self.annotations_dir}")
-        print(f"  Split            : {self.split or 'all'}")
-        print(f"  Target category  : {self.target_category} ({cat_name})")
-        print(f"  Min score filter : {self.min_score}")
-        print(f"  Subsample steps  : {self.subsample_steps}")
-        print("-" * 60)
-        print(f"  Total sequences  : {len(self.sequence_map)}")
-        print(f"  Total frames     : {total}")
-        print(f"  Positive frames  : {num_positive} ({100 * num_positive / max(total, 1):.1f}%)")
-        print(f"  Negative frames  : {num_negative} ({100 * num_negative / max(total, 1):.1f}%)")
-        print(f"  Class ratio -/+  : {num_negative / max(num_positive, 1):.2f}")
-        print("=" * 60)
-        print()
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> Optional[Dict[str, Any]]:
-        seq_idx, frame_idx, target, max_score = self.samples[index]
-        seq_id, frames = self.sequence_map[seq_idx]
-
-        # Read image
-        try:
-            img_np = frames[frame_idx].read()
-            if img_np is None:
-                return None
-        except Exception:
-            return None
-
-        img = Image.fromarray(img_np)
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-        return {
-            "image": img,
-            "target": torch.tensor(target, dtype=torch.float32),
-            "score": max_score,
-            "metadata": {
-                "seq_idx": seq_idx,
-                "seq_id": seq_id,
-                "frame_idx": frame_idx,
-            },
-        }
-
-    def get_sequence_info(self, seq_idx: int) -> Dict[str, Any]:
-        """Return metadata about a sequence (for debugging/inspection)."""
-        seq_id, frames = self.sequence_map[seq_idx]
-        return {
-            "seq_idx": seq_idx,
-            "seq_id": seq_id,
-            "num_frames": len(frames),
-        }
-
-
-# =============================================================================
-# ZODDetectionDataset (Offline, Detection)
-# =============================================================================
-
-
-class ZODDetectionDataset(Dataset):
-    """
-    PyTorch Dataset for offline multi-class object detection on ZOD sequences.
-
-    Each sample is a single frame with bounding boxes and class labels for all
-    detected categories. Used with DataLoader for shuffled, multi-epoch training
-    to establish an upper-bound detection baseline.
-
-    Args:
-        dataset_root: Path to ZOD dataset.
-        annotations_dir: Path to directory with per-sequence annotation JSONs.
-        version: ZOD version, "full" or "mini".
-        split: "train", "val", or None.
-        transform: Torchvision transform to apply to images (e.g. ToTensor).
-        min_score: Minimum detection score to include.
-        min_box_area: Minimum box area (w*h) to include. Drops tiny boxes
-            that are below the detector's effective resolution.
-        subsample_steps: Use every Nth frame (1 = all frames).
-        augmentation: Optional DetectionAugmentation for training.
-            Applied to (PIL image, target) before the image transform.
+        manifest_path: Path to the preprocessing manifest JSON.
+        split: "train" or "val".
+        transform: Torchvision transform applied to images (e.g. ToTensor).
+        augmentation: Optional DetectionAugmentation applied to
+            (PIL image, target dict) before the image transform.
+        min_box_area: Minimum box area to keep (post-scaling filter already
+            applied during preprocessing; set 0 to disable further filtering).
+        frame_range: Optional (start, end) index range into the
+            chronologically-sorted manifest to select a subset of frames
+            (e.g. first 1000 for bootstrap).
         verbose: Print dataset statistics after loading.
 
     Item format:
         (image, target) where:
-        - image: Tensor (3, H, W) in [0, 1] after transform
+        - image: Tensor (3, H, W) in [0, 1]
         - target: {"boxes": FloatTensor[N, 4] xyxy, "labels": Int64Tensor[N]}
     """
 
     def __init__(
         self,
-        dataset_root: str | Path,
-        annotations_dir: str | Path,
-        version: Literal["full", "mini"] = "full",
-        split: Optional[Literal["train", "val"]] = None,
+        manifest_path: str | Path,
+        split: Literal["train", "val"] = "train",
         transform: Optional[Callable] = None,
-        min_score: float = 0.0,
-        min_box_area: float = 0.0,
-        subsample_steps: int = 1,
         augmentation: Optional[DetectionAugmentation] = None,
+        min_box_area: float = 0.0,
+        frame_range: Optional[Tuple[int, int]] = None,
         verbose: bool = True,
     ):
-        self.dataset_root = Path(dataset_root)
-        self.annotations_dir = Path(annotations_dir)
-        self.version = version
+        self.manifest_path = Path(manifest_path)
+        self.base_dir = self.manifest_path.parent
         self.split = split
         self.transform = transform
-        self.min_score = min_score
-        self.min_box_area = min_box_area
-        self.subsample_steps = subsample_steps
         self.augmentation = augmentation
+        self.min_box_area = min_box_area
 
-        # Load ZOD sequences
-        zod_sequences = ZodSequences(str(self.dataset_root), version)
+        manifest = load_manifest(self.manifest_path)
+        all_frames = manifest["frames"]
 
-        if split == "train":
-            sequence_ids = zod_sequences.get_split(constants.TRAIN)
-            self.sequences = [zod_sequences[seq_id] for seq_id in sequence_ids]
-        elif split == "val":
-            sequence_ids = zod_sequences.get_split(constants.VAL)
-            self.sequences = [zod_sequences[seq_id] for seq_id in sequence_ids]
-        else:
-            self.sequences = list(zod_sequences)
+        # Filter by split
+        split_frames = [f for f in all_frames if f["split"] == split]
 
-        # Build sample index and load annotations
-        # samples: list of (seq_idx, frame_idx)
-        # sequence_map: seq_idx -> (seq_id, frames_list)
-        # frame_info_map: seq_idx -> {frame_idx -> annotation info}
-        self.samples: List[Tuple[int, int]] = []
-        self.sequence_map: Dict[int, Tuple[str, Any]] = {}
-        self.frame_info_map: Dict[int, Dict[int, Dict[str, Any]]] = {}
+        # Apply frame range (chronological subset)
+        if frame_range is not None:
+            start, end = frame_range
+            split_frames = split_frames[start:end]
 
-        total_annotations = 0
-        frames_with_objects = 0
-
-        for seq_idx, sequence in enumerate(self.sequences):
-            seq_id = sequence.info.id
-            frames = sequence.info.get_camera_frames()
-
-            self.sequence_map[seq_idx] = (seq_id, frames)
-
-            # Load detection annotations for this sequence
-            ann_path = self.annotations_dir / f"{seq_id}.json"
-            frame_info = load_detection_frame_info(
-                ann_path, self.min_score, self.min_box_area,
-            )
-            self.frame_info_map[seq_idx] = frame_info
-
-            for frame_idx in range(0, len(frames), self.subsample_steps):
-                self.samples.append((seq_idx, frame_idx))
-                info = frame_info.get(frame_idx, {})
-                if info.get("has_target", False):
-                    frames_with_objects += 1
-                    total_annotations += len(info.get("annotations", []))
-
-        self._frames_with_objects = frames_with_objects
-        self._total_annotations = total_annotations
+        self.frames = split_frames
 
         if verbose:
             self._print_summary()
 
     def _print_summary(self) -> None:
-        """Print dataset statistics."""
-        total = len(self.samples)
-        empty = total - self._frames_with_objects
-        cats = ", ".join(f"{v} ({k})" for k, v in CATEGORY_ID_TO_NAME.items())
+        total = len(self.frames)
+        with_objects = sum(1 for f in self.frames if f["num_objects"] > 0)
+        total_anns = sum(f["num_objects"] for f in self.frames)
 
         print()
         print("=" * 60)
-        print("ZODDetectionDataset Summary")
+        print("DetectionDataset Summary")
         print("=" * 60)
-        print(f"  Dataset root       : {self.dataset_root}")
-        print(f"  Annotations dir    : {self.annotations_dir}")
-        print(f"  Split              : {self.split or 'all'}")
-        print(f"  Categories         : {cats}")
-        print(f"  Min score filter   : {self.min_score}")
-        print(f"  Min box area       : {self.min_box_area}")
-        print(f"  Subsample steps    : {self.subsample_steps}")
-        print(f"  Augmentation       : {'yes' if self.augmentation else 'no'}")
+        print(f"  Manifest         : {self.manifest_path}")
+        print(f"  Split            : {self.split}")
+        print(f"  Categories       : {len(CATEGORY_NAME_TO_ID)}")
         print("-" * 60)
-        print(f"  Total sequences    : {len(self.sequence_map)}")
-        print(f"  Total frames       : {total}")
-        print(f"  Frames with objects: {self._frames_with_objects} ({100 * self._frames_with_objects / max(total, 1):.1f}%)")
-        print(f"  Empty frames       : {empty} ({100 * empty / max(total, 1):.1f}%)")
-        print(f"  Total annotations  : {self._total_annotations}")
-        print(f"  Avg objects/frame  : {self._total_annotations / max(total, 1):.1f}")
+        print(f"  Total frames     : {total}")
+        print(f"  Frames with objs : {with_objects} ({100 * with_objects / max(total, 1):.1f}%)")
+        print(f"  Total annotations: {total_anns}")
+        print(f"  Avg objects/frame: {total_anns / max(total, 1):.1f}")
         print("=" * 60)
         print()
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.frames)
 
     def __getitem__(self, index: int) -> Optional[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        seq_idx, frame_idx = self.samples[index]
-        seq_id, frames = self.sequence_map[seq_idx]
-        frame_info = self.frame_info_map[seq_idx]
+        frame_entry = self.frames[index]
 
         # Read image
+        img_path = self.base_dir / frame_entry["image_path"]
         try:
-            img_np = frames[frame_idx].read()
-            if img_np is None:
-                return None
+            img = Image.open(img_path).convert("RGB")
         except Exception:
             return None
 
-        img = Image.fromarray(img_np)
+        # Load annotation
+        ann_path = self.base_dir / frame_entry["annotation_path"]
+        try:
+            ann_data = _load_annotation(ann_path)
+        except Exception:
+            ann_data = {"annotations": []}
 
-        # Get annotations (empty target if no annotations for this frame)
-        info = frame_info.get(frame_idx, {})
-        raw_anns = info.get("annotations", [])
-        target = format_detection_annotations(raw_anns)
+        target = format_detection_annotations(ann_data.get("annotations", []))
 
-        # Apply detection augmentation (on PIL image + tensor target)
+        # Apply detection augmentation
         if self.augmentation is not None:
             img, target = self.augmentation(img, target)
 
-        # Apply image transform (e.g. ToTensor)
+        # Optional training-time filtering for very small boxes
+        target = filter_small_boxes(target, self.min_box_area)
+
+        # Apply image transform
         if self.transform is not None:
             img = self.transform(img)
 
         return img, target
+
+    def get_frame_entry(self, index: int) -> Dict[str, Any]:
+        """Return the raw manifest entry for a frame (for debugging)."""
+        return self.frames[index]
+
+
+# =============================================================================
+# DetectionStream (Streaming — chronological single-pass)
+# =============================================================================
+
+
+class DetectionStream:
+    """
+    Streaming dataset that yields frames in strict chronological order.
+
+    Unlike DetectionDataset which supports shuffled DataLoader access,
+    this class is an iterator that produces one StreamItem at a time in the
+    order they appear in the manifest (sorted by frame_id / timestamp).
+
+    Args:
+        manifest_path: Path to the preprocessing manifest JSON.
+        split: "train" or "val".
+        transform: Image transform (e.g. ToTensor).
+        augmentation: Optional DetectionAugmentation.
+        min_box_area: Minimum box area to keep. Set 0 to disable.
+        frame_range: Optional (start, end) index range to select a subset.
+        verbose: Print dataset statistics after loading.
+    """
+
+    def __init__(
+        self,
+        manifest_path: str | Path,
+        split: Literal["train", "val"] = "train",
+        transform: Optional[Callable] = None,
+        augmentation: Optional[DetectionAugmentation] = None,
+        min_box_area: float = 0.0,
+        frame_range: Optional[Tuple[int, int]] = None,
+        verbose: bool = True,
+    ):
+        self.manifest_path = Path(manifest_path)
+        self.base_dir = self.manifest_path.parent
+        self.split = split
+        self.transform = transform
+        self.augmentation = augmentation
+        self.min_box_area = min_box_area
+
+        manifest = load_manifest(self.manifest_path)
+        all_frames = manifest["frames"]
+
+        split_frames = [f for f in all_frames if f["split"] == split]
+
+        if frame_range is not None:
+            start, end = frame_range
+            split_frames = split_frames[start:end]
+
+        self.frames = split_frames
+
+        if verbose:
+            self._print_summary()
+
+    def _print_summary(self) -> None:
+        total = len(self.frames)
+        with_objects = sum(1 for f in self.frames if f["num_objects"] > 0)
+
+        print()
+        print("=" * 60)
+        print("DetectionStream Summary")
+        print("=" * 60)
+        print(f"  Manifest     : {self.manifest_path}")
+        print(f"  Split        : {self.split}")
+        print(f"  Total frames : {total}")
+        print(f"  With objects : {with_objects} ({100 * with_objects / max(total, 1):.1f}%)")
+        print(f"  Stream order : chronological (by frame_id)")
+        print("=" * 60)
+        print()
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def __iter__(self) -> Iterator[StreamItem]:
+        for global_idx, frame_entry in enumerate(self.frames):
+            item = self._load_item(frame_entry, global_idx)
+            if item is not None:
+                yield item
+
+    def _load_item(self, frame_entry: Dict[str, Any], global_idx: int) -> Optional[StreamItem]:
+        """Load a single frame as a StreamItem."""
+        img_path = self.base_dir / frame_entry["image_path"]
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception:
+            return None
+
+        ann_path = self.base_dir / frame_entry["annotation_path"]
+        try:
+            ann_data = _load_annotation(ann_path)
+        except Exception:
+            ann_data = {"annotations": [], "categories_present": []}
+
+        annotations = format_detection_annotations(ann_data.get("annotations", []))
+        annotations = filter_small_boxes(annotations, self.min_box_area)
+        categories: Set[str] = {
+            CATEGORY_ID_TO_NAME[int(label.item()) - 1]
+            for label in annotations["labels"]
+            if int(label.item()) - 1 in CATEGORY_ID_TO_NAME
+        }
+
+        if self.augmentation is not None:
+            img, annotations = self.augmentation(img, annotations)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        metadata = {
+            "global_idx": global_idx,
+            "frame_id": frame_entry["frame_id"],
+        }
+
+        return StreamItem(
+            image=img,
+            annotations=annotations,
+            categories=categories,
+            metadata=metadata,
+        )
+
+
+# =============================================================================
+# Collate function for detection datasets
+# =============================================================================
 
 
 def detection_collate(
@@ -678,8 +468,6 @@ def detection_collate(
 
     Filters out None samples and returns (images, targets) as lists,
     which is the format expected by torchvision detection models.
-
-    Returns None if all samples failed.
     """
     batch = [b for b in batch if b is not None]
     if len(batch) == 0:
@@ -688,318 +476,3 @@ def detection_collate(
     images = [b[0] for b in batch]
     targets = [b[1] for b in batch]
     return images, targets
-
-
-# =============================================================================
-# StreamingDataset (Online)
-# =============================================================================
-
-class StreamingDataset:
-    """
-    Streaming dataset that processes ZOD sequences in strict temporal order.
-
-    Unlike the offline datasets (ZODClassificationDataset / ZODDetectionDataset) which
-    shuffle frames and use a DataLoader, this dataset yields one frame at a
-    time in temporal order. The learner (or filter policy) decides for each
-    frame whether to train, store, or skip.
-
-    Supports two tasks:
-    - "classification": Binary labels (has target category or not).
-    - "detection": Bounding boxes and class labels for all categories.
-
-    Args:
-        dataset_root: Path to ZOD dataset root.
-        annotations_dir: Path to directory with per-sequence annotation JSONs.
-        version: ZOD version, "full" or "mini".
-        split: "train" or "val".
-        transform: Image transform applied after augmentation (e.g. ToTensor).
-        target_category: Category ID (0=person, 1=car, 2=traffic_light).
-            Only used for classification; ignored for detection.
-        min_score: Minimum pseudo-label score to include a detection.
-        min_box_area: Minimum box area (w*h) to include. Only used for
-            detection; ignored for classification.
-        subsample_steps: Use every Nth frame (1 = all frames).
-        task: "classification" or "detection".
-        augmentation: Optional DetectionAugmentation applied to
-            (PIL image, target dict) pairs before transform.
-            Only used when task="detection".
-        verbose: Print dataset statistics after loading.
-
-    Usage:
-
-        dataset = StreamingDataset(...)
-        for stream_item in dataset:
-            action = policy.select_action(stream_item)
-            if action == "train":
-                update(model, stream_item)
-    """
-
-    def __init__(
-        self,
-        dataset_root: str | Path,
-        annotations_dir: str | Path,
-        version: Literal["full", "mini"] = "full",
-        split: Literal["train", "val"] = "train",
-        transform: Optional[Callable] = None,
-        target_category: int = 0,
-        min_score: float = 0.0,
-        min_box_area: float = 0.0,
-        subsample_steps: int = 1,
-        task: Literal["classification", "detection"] = "classification",
-        augmentation: Optional[DetectionAugmentation] = None,
-        verbose: bool = True,
-    ):
-        self.dataset_root = Path(dataset_root)
-        self.annotations_dir = Path(annotations_dir)
-        self.version = version
-        self.split = split
-        self.transform = transform
-        self.target_category = target_category
-        self.min_score = min_score
-        self.min_box_area = min_box_area
-        self.subsample_steps = subsample_steps
-        self.task = task
-        self.augmentation = augmentation
-
-        # Load ZOD sequences
-        zod_sequences = ZodSequences(str(self.dataset_root), version)
-
-        # Get sequences for this split
-        if split == "train":
-            sequence_ids = zod_sequences.get_split(constants.TRAIN)
-        else:  # val
-            sequence_ids = zod_sequences.get_split(constants.VAL)
-
-        self.sequences = [zod_sequences[seq_id] for seq_id in sequence_ids]
-
-        # Build sequence metadata
-        self.sequence_metadata: List[Dict[str, Any]] = []
-        self.total_frames = 0
-
-        for seq_idx, sequence in enumerate(self.sequences):
-            seq_id = sequence.info.id
-            frames = sequence.info.get_camera_frames()
-
-            # Load annotations (dispatches based on self.task)
-            ann_path = self.annotations_dir / f"{seq_id}.json"
-            frame_info = self._load_frame_info(ann_path)
-
-            # Count subsampled frames
-            num_frames = len(range(0, len(frames), self.subsample_steps))
-            self.total_frames += num_frames
-
-            self.sequence_metadata.append({
-                "seq_idx": seq_idx,
-                "seq_id": seq_id,
-                "frames": frames,
-                "frame_info": frame_info,
-                "num_frames": len(frames),
-                "num_subsampled_frames": num_frames,
-            })
-
-        if verbose:
-            self._print_summary()
-
-    def _load_frame_info(self, ann_path: Path) -> Dict[int, Dict[str, Any]]:
-        """Load per-frame info (dispatches based on task)."""
-        if self.task == "detection":
-            return load_detection_frame_info(
-                ann_path, self.min_score, self.min_box_area,
-            )
-        return load_classification_frame_info(ann_path, self.target_category, self.min_score)
-
-    def _read_frame_image(self, frames: Any, frame_idx: int) -> Optional[Image.Image]:
-        """Read a single frame and return as PIL Image, or None on failure."""
-        try:
-            img_np = frames[frame_idx].read()
-            if img_np is None:
-                return None
-        except Exception:
-            return None
-        return Image.fromarray(img_np)
-
-    def _build_stream_item(
-        self,
-        img: Image.Image,
-        info: Dict[str, Any],
-        metadata: Dict[str, Any],
-    ) -> StreamItem:
-        """
-        Build a StreamItem from a PIL image and its annotation info.
-
-        Handles detection annotation formatting, augmentation, and the
-        image transform so that all frame-processing logic lives in one
-        place (used by both __iter__ and get_sequence_iterator).
-        """
-        target = 1.0 if info.get("has_target", False) else 0.0
-        teacher_score = info.get("max_score", 0.0)
-
-        annotations = None
-        if self.task == "detection":
-            raw_anns = info.get("annotations", [])
-            annotations = format_detection_annotations(raw_anns)
-            if self.augmentation is not None:
-                img, annotations = self.augmentation(img, annotations)
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-        return StreamItem(
-            image=img,
-            target=target,
-            teacher_score=teacher_score,
-            metadata=metadata,
-            annotations=annotations,
-        )
-
-    def _print_summary(self) -> None:
-        """Print streaming dataset statistics."""
-        num_positive = 0
-        total_annotations = 0
-
-        for seq_meta in self.sequence_metadata:
-            frame_info = seq_meta["frame_info"]
-            for frame_idx in range(0, seq_meta["num_frames"], self.subsample_steps):
-                info = frame_info.get(frame_idx, {"has_target": False})
-                if info["has_target"]:
-                    num_positive += 1
-                if self.task == "detection":
-                    total_annotations += len(info.get("annotations", []))
-
-        num_negative = self.total_frames - num_positive
-
-        print()
-        print("=" * 60)
-        print("StreamingDataset Summary")
-        print("=" * 60)
-        print(f"  Dataset root     : {self.dataset_root}")
-        print(f"  Annotations dir  : {self.annotations_dir}")
-        print(f"  Split            : {self.split}")
-        print(f"  Task             : {self.task}")
-        if self.task == "classification":
-            cat_name = CATEGORY_ID_TO_NAME.get(self.target_category, str(self.target_category))
-            print(f"  Target category  : {self.target_category} ({cat_name})")
-        else:
-            cats = ", ".join(f"{v} ({k})" for k, v in CATEGORY_ID_TO_NAME.items())
-            print(f"  Categories       : {cats}")
-        print(f"  Min score filter : {self.min_score}")
-        if self.task == "detection" and self.min_box_area > 0:
-            print(f"  Min box area     : {self.min_box_area}")
-        print(f"  Subsample steps  : {self.subsample_steps}")
-        print("-" * 60)
-        print(f"  Total sequences  : {len(self.sequence_metadata)}")
-        print(f"  Total frames     : {self.total_frames}")
-        if self.task == "detection":
-            print(f"  Frames with objects : {num_positive} ({100 * num_positive / max(self.total_frames, 1):.1f}%)")
-            print(f"  Empty frames       : {num_negative} ({100 * num_negative / max(self.total_frames, 1):.1f}%)")
-            print(f"  Total annotations  : {total_annotations}")
-            print(f"  Avg objects/frame  : {total_annotations / max(self.total_frames, 1):.1f}")
-        else:
-            print(f"  Positive frames  : {num_positive} ({100 * num_positive / max(self.total_frames, 1):.1f}%)")
-            print(f"  Negative frames  : {num_negative} ({100 * num_negative / max(self.total_frames, 1):.1f}%)")
-        print(f"  Stream order     : temporal (sequence-by-sequence)")
-        print("=" * 60)
-        print()
-
-    def __len__(self) -> int:
-        """Return total number of stream items."""
-        return self.total_frames
-
-    def __iter__(self) -> Iterator[StreamItem]:
-        """
-        Iterate over all stream items in strict temporal order.
-
-        Yields one StreamItem per (subsampled) frame, processing
-        sequences one after another. Frames that fail to load are silently
-        skipped (the global index still increments to keep provenance
-        consistent).
-        """
-        global_idx = 0
-
-        for seq_meta in self.sequence_metadata:
-            seq_id = seq_meta["seq_id"]
-            seq_idx = seq_meta["seq_idx"]
-            frames = seq_meta["frames"]
-            frame_info = seq_meta["frame_info"]
-
-            for frame_idx in range(0, seq_meta["num_frames"], self.subsample_steps):
-                info = frame_info.get(frame_idx, {"has_target": False, "max_score": 0.0})
-
-                img = self._read_frame_image(frames, frame_idx)
-                if img is None:
-                    global_idx += 1
-                    continue
-
-                metadata = {
-                    "global_idx": global_idx,
-                    "seq_idx": seq_idx,
-                    "seq_id": seq_id,
-                    "frame_idx": frame_idx,
-                }
-
-                yield self._build_stream_item(img, info, metadata)
-                global_idx += 1
-
-    def get_sequence_iterator(self, seq_idx: int) -> Iterator[StreamItem]:
-        """
-        Iterate over a single sequence (useful for federated simulation).
-
-        Each simulated client receives its own subset of sequences and
-        streams through them independently via this method.
-
-        Args:
-            seq_idx: Index of the sequence to iterate over.
-
-        Yields:
-            StreamItem for each (subsampled) frame in the sequence.
-
-        Raises:
-            ValueError: If *seq_idx* is out of range.
-        """
-        if seq_idx < 0 or seq_idx >= len(self.sequence_metadata):
-            raise ValueError(
-                f"seq_idx {seq_idx} out of range for dataset with "
-                f"{len(self.sequence_metadata)} sequences"
-            )
-
-        seq_meta = self.sequence_metadata[seq_idx]
-        seq_id = seq_meta["seq_id"]
-        frames = seq_meta["frames"]
-        frame_info = seq_meta["frame_info"]
-
-        for frame_idx in range(0, seq_meta["num_frames"], self.subsample_steps):
-            info = frame_info.get(frame_idx, {"has_target": False, "max_score": 0.0})
-
-            img = self._read_frame_image(frames, frame_idx)
-            if img is None:
-                continue
-
-            metadata = {
-                "seq_idx": seq_idx,
-                "seq_id": seq_id,
-                "frame_idx": frame_idx,
-            }
-
-            yield self._build_stream_item(img, info, metadata)
-
-
-# =============================================================================
-# Collate function that drops None samples
-# =============================================================================
-
-def classification_collate(batch: List[Optional[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
-    """
-    Collate function that filters out None samples (failed reads).
-
-    Returns None if all samples are None.
-    """
-    batch = [b for b in batch if b is not None]
-    if len(batch) == 0:
-        return None
-
-    return {
-        "image": torch.stack([b["image"] for b in batch]),
-        "target": torch.stack([b["target"] for b in batch]),
-        "score": torch.tensor([b["score"] for b in batch], dtype=torch.float32),
-        "metadata": [b["metadata"] for b in batch],
-    }

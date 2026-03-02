@@ -1,11 +1,9 @@
 """
 Model definitions.
 
-    Classifier  Binary classification (ResNet backbone + linear head)
-    Detector    Object detection (FCOS with ResNet50-FPN backbone)
+    Detector    Object detection (FCOS with ResNet50-FPN backbone + embedding extraction)
 """
 
-from .classifier import Classifier
 from .detector import Detector
 
-__all__ = ["Classifier", "Detector"]
+__all__ = ["Detector"]

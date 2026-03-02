@@ -229,8 +229,8 @@ runs/
 logs/
 tensorboard/
 
-# Generated annotations
-data/annotations_*/
+# Data
+data/
 
 # Other
 nohup.out

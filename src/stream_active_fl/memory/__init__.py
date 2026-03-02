@@ -1,10 +1,9 @@
 """
-Memory management for continual learning.
+Memory management for streaming learning.
 
-Bounded memory structures for experience replay and rehearsal:
-- ReplayBuffer: Bounded buffer with configurable admission policies (FIFO, random, reservoir)
+    TrainingBuffer   Fixed-capacity buffer for batch training
 """
 
-from .replay_buffer import ReplayBuffer
+from .training_buffer import TrainingBuffer
 
-__all__ = ["ReplayBuffer"]
+__all__ = ["TrainingBuffer"]

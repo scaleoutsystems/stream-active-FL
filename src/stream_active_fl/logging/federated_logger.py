@@ -20,10 +20,10 @@ _CLASSIFICATION_EVAL_KEYS = ["loss", "accuracy", "precision", "recall", "f1"]
 
 _DETECTION_EVAL_COLS = [
     "eval_mAP", "eval_mAP_50", "eval_mAP_75",
-    "eval_AP_person", "eval_AP_car", "eval_AP_traffic_light",
+    "eval_AP_Vehicle", "eval_AP_Pedestrian", "eval_AP_VulnerableVehicle",
 ]
 _DETECTION_EVAL_KEYS = [
-    "mAP", "mAP_50", "mAP_75", "AP_person", "AP_car", "AP_traffic_light",
+    "mAP", "mAP_50", "mAP_75", "AP_Vehicle", "AP_Pedestrian", "AP_VulnerableVehicle",
 ]
 
 

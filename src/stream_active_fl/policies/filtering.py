@@ -1,30 +1,26 @@
 """
-Filter policies for selective training in streaming learning.
+Filter policies for selective training in buffer-based streaming learning.
 
-Policies decide which stream items should trigger parameter updates (train),
-be stored for replay (store), or be skipped entirely.
+Policies decide which stream items should be accepted (added to the training
+buffer) or rejected (discarded).
 
 Available policies:
-- NoFilterPolicy: Train on every item (unfiltered baseline)
-- DifficultyBasedPolicy: Train on high-loss items, with optional adaptive
-  thresholding (percentile-based)
-- TopKPolicy: Train on top-K hardest items in a sliding window
-- GradientNormPolicy: Train on items with largest parameter gradient norms
+- NoFilterPolicy: Accept every item (unfiltered baseline)
+- DistributionBasedPolicy: Accept items whose backbone embedding falls on the
+  tail of the distribution seen so far (novel / unusual frames)
+- UncertaintyBasedPolicy: Accept items where the model's detection confidence
+  is low (the model is uncertain = frame is informative)
+- GradientNormPolicy: Accept items with the largest parameter gradient norms
 
-All policies can be wrapped with TeacherConfidenceGate to additionally
-filter out positive items with low-confidence pseudo-labels.
-
-When a policy that computes loss (e.g. DifficultyBasedPolicy, TopKPolicy,
-GradientNormPolicy) selects "train", it may return the loss tensor from its
-forward pass so the training loop can reuse it for the backward step,
-avoiding a second forward for the same item.
+Each policy returns ("accept" | "reject", metadata_dict) where the metadata
+dict carries information for logging (e.g. the score used for the decision).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
@@ -33,10 +29,8 @@ import torch.nn as nn
 from ..core.items import StreamItem
 
 
-Action = Literal["train", "store", "skip"]
-# When a policy computes loss for filtering and decides "train", it may return
-# that loss tensor so the training loop can reuse it (one forward instead of two).
-FilterResult = Tuple[Action, Optional[torch.Tensor]]
+Action = Literal["accept", "reject"]
+FilterResult = Tuple[Action, Dict[str, Any]]
 
 
 # =============================================================================
@@ -47,106 +41,52 @@ FilterResult = Tuple[Action, Optional[torch.Tensor]]
 @dataclass
 class SelectionTracker:
     """
-    Tracks per-class, per-action selection statistics over an interval.
+    Tracks per-category, per-action selection statistics over an interval.
 
-    Records what the filter selects (train/store/skip) broken down by
-    class (positive/negative) and loss values. Stats accumulate between
-    calls to reset_interval(), giving per-checkpoint-interval visibility.
+    Records what the filter selects (accept/reject) broken down by the
+    categories present in each frame.  Stats accumulate between calls to
+    reset_interval(), giving per-checkpoint-interval visibility.
     """
 
-    # Counts: action × class
-    train_pos: int = 0
-    train_neg: int = 0
-    skip_pos: int = 0
-    skip_neg: int = 0
-    store_pos: int = 0
-    store_neg: int = 0
+    accept_count: int = 0
+    reject_count: int = 0
+    accept_by_category: Dict[str, int] = None  # type: ignore[assignment]
+    reject_by_category: Dict[str, int] = None  # type: ignore[assignment]
 
-    # Loss accumulators (for averages)
-    loss_sum_train_pos: float = 0.0
-    loss_sum_train_neg: float = 0.0
-    loss_sum_skip_pos: float = 0.0
-    loss_sum_skip_neg: float = 0.0
+    def __post_init__(self):
+        if self.accept_by_category is None:
+            self.accept_by_category = {}
+        if self.reject_by_category is None:
+            self.reject_by_category = {}
 
-    def record(self, action: Action, target: float, loss: Optional[float] = None) -> None:
+    def record(self, action: Action, categories: set[str]) -> None:
         """Record a single filter decision."""
-        is_pos = target == 1.0
+        if action == "accept":
+            self.accept_count += 1
+            target = self.accept_by_category
+        else:
+            self.reject_count += 1
+            target = self.reject_by_category
 
-        if action == "train":
-            if is_pos:
-                self.train_pos += 1
-                if loss is not None:
-                    self.loss_sum_train_pos += loss
-            else:
-                self.train_neg += 1
-                if loss is not None:
-                    self.loss_sum_train_neg += loss
-        elif action == "skip":
-            if is_pos:
-                self.skip_pos += 1
-                if loss is not None:
-                    self.loss_sum_skip_pos += loss
-            else:
-                self.skip_neg += 1
-                if loss is not None:
-                    self.loss_sum_skip_neg += loss
-        elif action == "store":
-            if is_pos:
-                self.store_pos += 1
-            else:
-                self.store_neg += 1
+        for cat in categories:
+            target[cat] = target.get(cat, 0) + 1
 
     def get_interval_stats(self) -> Dict[str, Any]:
-        """Return stats for the current interval."""
-        total_train = self.train_pos + self.train_neg
-        total_skip = self.skip_pos + self.skip_neg
-        total_store = self.store_pos + self.store_neg
-        total = total_train + total_skip + total_store
-        total_pos = self.train_pos + self.skip_pos + self.store_pos
-        total_neg = self.train_neg + self.skip_neg + self.store_neg
-
-        stats: Dict[str, Any] = {
-            # Per-action counts
-            "train_pos": self.train_pos,
-            "train_neg": self.train_neg,
-            "skip_pos": self.skip_pos,
-            "skip_neg": self.skip_neg,
-            "store_pos": self.store_pos,
-            "store_neg": self.store_neg,
-            # Rates
-            "train_total": total_train,
-            "skip_total": total_skip,
-            "interval_total": total,
-            # Class distribution of trained items
-            "train_pos_ratio": self.train_pos / max(total_train, 1),
-            # Selection rates by class
-            "pos_train_rate": self.train_pos / max(total_pos, 1),
-            "neg_train_rate": self.train_neg / max(total_neg, 1),
-            # Raw loss sums (for merging in wrappers)
-            "loss_sum_train_pos": self.loss_sum_train_pos,
-            "loss_sum_train_neg": self.loss_sum_train_neg,
-            "loss_sum_skip_pos": self.loss_sum_skip_pos,
-            "loss_sum_skip_neg": self.loss_sum_skip_neg,
-            # Average loss by action × class
-            "avg_loss_train_pos": self.loss_sum_train_pos / max(self.train_pos, 1),
-            "avg_loss_train_neg": self.loss_sum_train_neg / max(self.train_neg, 1),
-            "avg_loss_skip_pos": self.loss_sum_skip_pos / max(self.skip_pos, 1),
-            "avg_loss_skip_neg": self.loss_sum_skip_neg / max(self.skip_neg, 1),
+        total = self.accept_count + self.reject_count
+        return {
+            "accept_count": self.accept_count,
+            "reject_count": self.reject_count,
+            "total": total,
+            "accept_rate": self.accept_count / max(total, 1),
+            "accept_by_category": dict(self.accept_by_category),
+            "reject_by_category": dict(self.reject_by_category),
         }
-        return stats
 
     def reset_interval(self) -> None:
-        """Reset counters for a new interval."""
-        self.train_pos = 0
-        self.train_neg = 0
-        self.skip_pos = 0
-        self.skip_neg = 0
-        self.store_pos = 0
-        self.store_neg = 0
-        self.loss_sum_train_pos = 0.0
-        self.loss_sum_train_neg = 0.0
-        self.loss_sum_skip_pos = 0.0
-        self.loss_sum_skip_neg = 0.0
+        self.accept_count = 0
+        self.reject_count = 0
+        self.accept_by_category = {}
+        self.reject_by_category = {}
 
 
 # =============================================================================
@@ -159,8 +99,7 @@ class FilterPolicy(ABC):
     Base class for filter policies.
 
     A policy examines a stream item and the current model state to decide
-    whether to train, store, or skip. All policies include a SelectionTracker
-    for per-class logging.
+    whether to accept (add to training buffer) or reject (discard).
     """
 
     def __init__(self):
@@ -171,242 +110,32 @@ class FilterPolicy(ABC):
         self,
         stream_item: StreamItem,
         model: nn.Module,
-        criterion: nn.Module,
         device: torch.device,
     ) -> FilterResult:
         """
-        Select an action for the given stream item.
+        Decide whether to accept or reject the given stream item.
 
         Args:
             stream_item: The current stream item.
-            model: The current model.
-            criterion: Loss function (may be None for detection).
+            model: The current model (may be used for embedding / uncertainty).
             device: Device to run computations on.
 
         Returns:
-            (action, precomputed_loss): action is "train", "store", or "skip".
-            precomputed_loss is a tensor to use for backward when action is
-            "train" and the policy already computed the current-item loss
-            (e.g. difficulty-based policies); otherwise None and the training
-            loop will perform its own forward.
+            (action, metadata): action is "accept" or "reject".
+            metadata is a dict with policy-specific info for logging
+            (e.g. {"score": 0.42, "threshold": 0.35}).
         """
-        pass
+        ...
 
     def get_stats(self) -> Dict[str, Any]:
         """Return policy statistics (for logging)."""
         return {}
 
     def get_selection_stats(self) -> Dict[str, Any]:
-        """Return per-class selection stats for the current interval."""
         return self.selection_tracker.get_interval_stats()
 
     def reset_selection_stats(self) -> None:
-        """Reset interval selection stats (call after each checkpoint)."""
         self.selection_tracker.reset_interval()
-
-
-def _compute_detection_item_loss_tensor(
-    stream_item: StreamItem,
-    model: nn.Module,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Compute detection loss for a single stream item (forward with grad).
-
-    Used by difficulty-based policies so the training loop can reuse this
-    loss for the backward pass instead of doing a second forward.
-    torchvision detection models must be in train() mode to return losses.
-    """
-    model.train()
-    image = stream_item.image.to(device)
-    target = {
-        "boxes": stream_item.annotations["boxes"].to(device),
-        "labels": stream_item.annotations["labels"].to(device),
-    }
-    loss_dict = model([image], [target])
-    return sum(loss_dict.values())
-
-
-def _compute_classification_item_loss_tensor(
-    stream_item: StreamItem,
-    model: nn.Module,
-    criterion: nn.Module,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Compute classification loss for a single stream item (forward with grad).
-
-    Used by difficulty-based policies so the training loop can reuse this
-    loss for the backward pass instead of doing a second forward.
-    """
-    model.train()
-    image = stream_item.image.unsqueeze(0).to(device)
-    target = torch.tensor([stream_item.target], dtype=torch.float32, device=device)
-    logits = model(image)
-    return criterion(logits, target)
-
-
-def _compute_item_loss_tensor(
-    stream_item: StreamItem,
-    model: nn.Module,
-    criterion: nn.Module,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Compute loss for a single stream item (forward with grad).
-
-    Dispatches to detection or classification. Returns a tensor so the
-    training loop can reuse it for backward when the policy selects "train".
-    """
-    if stream_item.annotations is not None:
-        return _compute_detection_item_loss_tensor(stream_item, model, device)
-    return _compute_classification_item_loss_tensor(
-        stream_item, model, criterion, device
-    )
-
-
-def _compute_gradient_norm(loss: torch.Tensor, model: nn.Module) -> float:
-    """
-    Compute the L2 norm of parameter gradients for a given loss.
-
-    Uses torch.autograd.grad with retain_graph=True so the loss tensor's
-    computation graph remains intact for a subsequent backward pass in the
-    training loop. Does not populate .grad attributes on parameters, so
-    gradient accumulation across stream items is unaffected.
-
-    Args:
-        loss: Scalar loss tensor with a computation graph.
-        model: Model whose trainable parameters to compute gradients for.
-
-    Returns:
-        L2 norm of the concatenated parameter gradient vector.
-    """
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    grads = torch.autograd.grad(
-        loss, trainable_params, retain_graph=True, allow_unused=True,
-    )
-    total = 0.0
-    for g in grads:
-        if g is not None:
-            total += g.pow(2).sum().item()
-    return total ** 0.5
-
-
-# =============================================================================
-# TeacherConfidenceGate (general-purpose wrapper)
-# =============================================================================
-
-
-class TeacherConfidenceGate(FilterPolicy):
-    """
-    General-purpose wrapper that gates on teacher pseudo-label confidence.
-
-    Wraps any FilterPolicy and skips positive items whose teacher confidence
-    is below a threshold. This removes uncertain pseudo-labels from training.
-
-    Only positive items (target == 1) are gated, because negative items
-    (target == 0) have teacher_score == 0 by convention (no detection found),
-    which is actually a confident prediction — the teacher is confident
-    nothing is there.
-
-    Args:
-        inner_policy: The underlying filter policy to delegate to.
-        tau_teacher: Confidence threshold. Positive items with
-            teacher_score < tau_teacher are skipped.
-        store_gated: If True, gated items get action "store" instead of "skip".
-    """
-
-    def __init__(
-        self,
-        inner_policy: FilterPolicy,
-        tau_teacher: float = 0.5,
-        store_gated: bool = False,
-    ):
-        super().__init__()
-        self.inner_policy = inner_policy
-        self.tau_teacher = tau_teacher
-        self.store_gated = store_gated
-
-        # Statistics for the gate itself
-        self.count_gated = 0
-        self.count_passed = 0
-
-    def select_action(
-        self,
-        stream_item: StreamItem,
-        model: nn.Module,
-        criterion: nn.Module,
-        device: torch.device,
-    ) -> FilterResult:
-        # Only gate positive items with low teacher confidence
-        if (
-            stream_item.target == 1.0
-            and stream_item.teacher_score < self.tau_teacher
-        ):
-            self.count_gated += 1
-            action = "store" if self.store_gated else "skip"
-            self.selection_tracker.record(action, stream_item.target)
-            return (action, None)
-
-        # Otherwise, delegate to inner policy
-        self.count_passed += 1
-        return self.inner_policy.select_action(
-            stream_item, model, criterion, device
-        )
-
-    def get_stats(self) -> Dict[str, Any]:
-        total = self.count_gated + self.count_passed
-        inner_stats = self.inner_policy.get_stats()
-
-        gate_stats = {
-            "teacher_gate_tau": self.tau_teacher,
-            "teacher_gate_gated": self.count_gated,
-            "teacher_gate_passed": self.count_passed,
-            "teacher_gate_rate": self.count_gated / max(total, 1),
-        }
-
-        # Merge inner policy stats (inner stats take precedence for shared keys)
-        return {**gate_stats, **inner_stats}
-
-    def get_selection_stats(self) -> Dict[str, Any]:
-        """Merge gate's own tracking with inner policy's tracking."""
-        gate_stats = self.selection_tracker.get_interval_stats()
-        inner_stats = self.inner_policy.get_selection_stats()
-
-        # Sum the two trackers (gate handles items it rejects, inner handles the rest)
-        merged: Dict[str, Any] = {}
-        for key in gate_stats:
-            if isinstance(gate_stats[key], (int, float)):
-                merged[key] = gate_stats[key] + inner_stats.get(key, 0)
-            else:
-                merged[key] = gate_stats[key]
-
-        # Recompute derived rates from merged counts
-        total_train = merged.get("train_pos", 0) + merged.get("train_neg", 0)
-        total_skip = merged.get("skip_pos", 0) + merged.get("skip_neg", 0)
-        total = total_train + total_skip + merged.get("store_pos", 0) + merged.get("store_neg", 0)
-        total_pos = merged.get("train_pos", 0) + merged.get("skip_pos", 0) + merged.get("store_pos", 0)
-        total_neg = merged.get("train_neg", 0) + merged.get("skip_neg", 0) + merged.get("store_neg", 0)
-
-        merged["train_total"] = total_train
-        merged["skip_total"] = total_skip
-        merged["interval_total"] = total
-        merged["train_pos_ratio"] = merged.get("train_pos", 0) / max(total_train, 1)
-        merged["pos_train_rate"] = merged.get("train_pos", 0) / max(total_pos, 1)
-        merged["neg_train_rate"] = merged.get("train_neg", 0) / max(total_neg, 1)
-
-        # Recompute avg losses from merged sums/counts
-        merged["avg_loss_train_pos"] = merged.get("loss_sum_train_pos", 0) / max(merged.get("train_pos", 0), 1)
-        merged["avg_loss_train_neg"] = merged.get("loss_sum_train_neg", 0) / max(merged.get("train_neg", 0), 1)
-        merged["avg_loss_skip_pos"] = merged.get("loss_sum_skip_pos", 0) / max(merged.get("skip_pos", 0), 1)
-        merged["avg_loss_skip_neg"] = merged.get("loss_sum_skip_neg", 0) / max(merged.get("skip_neg", 0), 1)
-
-        return merged
-
-    def reset_selection_stats(self) -> None:
-        """Reset both gate and inner policy trackers."""
-        self.selection_tracker.reset_interval()
-        self.inner_policy.reset_selection_stats()
 
 
 # =============================================================================
@@ -415,264 +144,314 @@ class TeacherConfidenceGate(FilterPolicy):
 
 
 class NoFilterPolicy(FilterPolicy):
-    """
-    Baseline policy: train on every stream item.
-
-    This is the unfiltered streaming baseline.
-    """
+    """Baseline policy: accept every stream item."""
 
     def __init__(self):
         super().__init__()
-        self.count_train = 0
+        self.count = 0
 
     def select_action(
         self,
         stream_item: StreamItem,
         model: nn.Module,
-        criterion: nn.Module,
         device: torch.device,
     ) -> FilterResult:
-        self.count_train += 1
-        self.selection_tracker.record("train", stream_item.target)
-        return ("train", None)
+        self.count += 1
+        self.selection_tracker.record("accept", stream_item.categories)
+        return ("accept", {})
 
     def get_stats(self) -> Dict[str, Any]:
-        return {
-            "count_train": self.count_train,
-            "train_rate": 1.0,
-        }
+        return {"count_accept": self.count, "accept_rate": 1.0}
 
 
 # =============================================================================
-# DifficultyBasedPolicy
+# DistributionBasedPolicy
 # =============================================================================
 
 
-class DifficultyBasedPolicy(FilterPolicy):
+class DistributionBasedPolicy(FilterPolicy):
     """
-    Difficulty-based selective training policy.
+    Embedding-distribution-based selective training policy.
 
-    Computes the loss on each stream item (forward pass) and triggers training
-    only for items that are sufficiently "hard". Supports two modes:
+    Maintains a running estimate of the embedding distribution seen so far
+    (initialized from bootstrap statistics).  For each new frame, extracts
+    its backbone embedding and computes a distance score.  Frames on the
+    "tail" of the distribution (high distance) are accepted as novel;
+    frames near the center are rejected as redundant.
 
-    **Adaptive mode (default)**: Maintains a sliding window of recent losses
-    and trains on items whose loss falls in the top fraction. This avoids
-    needing to hand-tune an absolute loss threshold.
-
-    **Fixed mode**: Uses absolute thresholds (tau_loss). Only useful when you
-    know the loss scale well.
+    Supports three distance modes:
+    - "mahalanobis": Mahalanobis distance to the running mean (requires
+      covariance from bootstrap).
+    - "cosine": 1 - cosine_similarity to the running mean.
+    - "knn": Average distance to the k nearest neighbors in a stored
+      buffer of recent embeddings.
 
     Args:
-        adaptive: If True, use percentile-based adaptive thresholding.
-        train_fraction: Fraction of items to train on (only if adaptive=True).
-            E.g. 0.3 means train on the ~30% hardest items.
-        loss_window_size: Size of the sliding window for loss history
-            (only if adaptive=True).
-        warmup_items: Number of items to process before applying the adaptive
-            threshold. During warmup, all items are trained on to build up
-            an initial loss distribution.
-        tau_loss: Absolute loss threshold (only if adaptive=False).
-        store_skipped: If True, skipped items are stored (action="store")
-            instead of fully discarded.
+        bootstrap_mean: Mean embedding vector from bootstrap (1D tensor).
+        bootstrap_cov: Covariance matrix from bootstrap (2D tensor).
+            Only required for mode="mahalanobis".
+        mode: Distance computation mode.
+        accept_fraction: Fraction of items to accept (top percentile by
+            distance). E.g. 0.3 means accept the ~30% most distant items.
+        score_window_size: Size of the sliding window for adaptive thresholding.
+        warmup_items: Accept all items unconditionally during warmup to
+            build a score distribution.
+        embedding_buffer_size: For mode="knn", how many recent embeddings
+            to store.
+        knn_k: For mode="knn", number of nearest neighbors.
+        update_stats: Whether to update running mean/cov with accepted embeddings.
     """
 
     def __init__(
         self,
-        adaptive: bool = True,
-        train_fraction: float = 0.3,
-        loss_window_size: int = 500,
-        warmup_items: int = 200,
-        tau_loss: float = 0.5,
-        store_skipped: bool = False,
+        bootstrap_mean: torch.Tensor,
+        bootstrap_cov: Optional[torch.Tensor] = None,
+        mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis",
+        accept_fraction: float = 0.3,
+        score_window_size: int = 500,
+        warmup_items: int = 100,
+        embedding_buffer_size: int = 1000,
+        knn_k: int = 10,
+        update_stats: bool = True,
     ):
         super().__init__()
-        self.adaptive = adaptive
-        self.train_fraction = train_fraction
-        self.loss_window_size = loss_window_size
+        self.mode = mode
+        self.accept_fraction = accept_fraction
+        self.score_window_size = score_window_size
         self.warmup_items = warmup_items
-        self.tau_loss = tau_loss
-        self.store_skipped = store_skipped
+        self.update_stats = update_stats
+        self.knn_k = knn_k
 
-        # Sliding window of recent losses (for adaptive mode)
-        self.loss_history: deque = deque(maxlen=loss_window_size)
+        # Running statistics
+        self.mean = bootstrap_mean.clone().float()
+        self.cov = bootstrap_cov.clone().float() if bootstrap_cov is not None else None
+        self._cov_inv: Optional[torch.Tensor] = None
 
-        # Statistics
-        self.count_train = 0
-        self.count_store = 0
-        self.count_skip = 0
+        if self.cov is not None:
+            reg = 1e-5 * torch.eye(self.cov.shape[0])
+            self._cov_inv = torch.linalg.inv(self.cov + reg)
+
+        # Embedding buffer for kNN
+        self.embedding_buffer: deque = deque(maxlen=embedding_buffer_size)
+
+        # Sliding window for adaptive thresholding
+        self.score_history: deque = deque(maxlen=score_window_size)
+
+        # Counters
         self.items_seen = 0
-        self.total_loss = 0.0
+        self.count_accept = 0
+        self.count_reject = 0
 
-    def _get_adaptive_threshold(self) -> float:
-        """
-        Compute the adaptive loss threshold from the loss history.
+        # Running mean update state
+        self._n_embeddings = 0
 
-        Returns the (1 - train_fraction) percentile of recent losses.
-        E.g. if train_fraction=0.3, returns the 70th percentile, so items
-        with loss above this value (top 30%) will be trained on.
-        """
-        if len(self.loss_history) == 0:
+    def _compute_score(self, embedding: torch.Tensor) -> float:
+        """Compute a distance score for a single embedding (1D tensor)."""
+        emb = embedding.float()
+
+        if self.mode == "mahalanobis":
+            if self._cov_inv is None:
+                diff = emb - self.mean
+                return float(diff.norm().item())
+            diff = emb - self.mean
+            return float(torch.sqrt(diff @ self._cov_inv @ diff).item())
+
+        elif self.mode == "cosine":
+            sim = torch.nn.functional.cosine_similarity(
+                emb.unsqueeze(0), self.mean.unsqueeze(0)
+            )
+            return float(1.0 - sim.item())
+
+        elif self.mode == "knn":
+            if len(self.embedding_buffer) < self.knn_k:
+                return float("inf")
+            buf = torch.stack(list(self.embedding_buffer))
+            dists = torch.cdist(emb.unsqueeze(0), buf).squeeze(0)
+            topk_dists, _ = dists.topk(self.knn_k, largest=False)
+            return float(topk_dists.mean().item())
+
+        raise ValueError(f"Unknown mode: {self.mode}")
+
+    def _get_threshold(self) -> float:
+        if len(self.score_history) == 0:
             return 0.0
+        sorted_scores = sorted(self.score_history)
+        idx = int(len(sorted_scores) * (1.0 - self.accept_fraction))
+        idx = min(idx, len(sorted_scores) - 1)
+        return sorted_scores[idx]
 
-        sorted_losses = sorted(self.loss_history)
-        percentile_idx = int(len(sorted_losses) * (1.0 - self.train_fraction))
-        percentile_idx = min(percentile_idx, len(sorted_losses) - 1)
-        return sorted_losses[percentile_idx]
+    def _update_running_stats(self, embedding: torch.Tensor) -> None:
+        """Incrementally update running mean with a new embedding."""
+        self._n_embeddings += 1
+        emb = embedding.float()
+        self.mean = self.mean + (emb - self.mean) / self._n_embeddings
+        self.embedding_buffer.append(emb.cpu())
 
     def select_action(
         self,
         stream_item: StreamItem,
         model: nn.Module,
-        criterion: nn.Module,
         device: torch.device,
     ) -> FilterResult:
         self.items_seen += 1
 
-        # Compute loss with grad so training loop can reuse it when we select train
-        loss = _compute_item_loss_tensor(
-            stream_item, model, criterion, device
-        )
-        loss_value = loss.item()
-        self.total_loss += loss_value
-        self.loss_history.append(loss_value)
+        image = stream_item.image.to(device)
+        embedding = model.get_embedding([image]).squeeze(0).cpu()
 
-        # During warmup, train on everything (to build loss distribution)
-        if self.adaptive and self.items_seen <= self.warmup_items:
-            self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return ("train", loss)
+        score = self._compute_score(embedding)
+        self.score_history.append(score)
 
-        # Determine threshold
-        if self.adaptive:
-            threshold = self._get_adaptive_threshold()
+        meta = {"score": score, "mode": self.mode}
+
+        # Warmup: accept all to build score distribution
+        if self.items_seen <= self.warmup_items:
+            self.count_accept += 1
+            if self.update_stats:
+                self._update_running_stats(embedding)
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
+
+        threshold = self._get_threshold()
+        meta["threshold"] = threshold
+
+        if score >= threshold:
+            self.count_accept += 1
+            if self.update_stats:
+                self._update_running_stats(embedding)
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
         else:
-            threshold = self.tau_loss
-
-        # Decide action
-        if loss_value > threshold:
-            self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return ("train", loss)
-        else:
-            if self.store_skipped:
-                self.count_store += 1
-                self.selection_tracker.record(
-                    "store", stream_item.target, loss_value
-                )
-                return ("store", None)
-            self.count_skip += 1
-            self.selection_tracker.record("skip", stream_item.target, loss_value)
-            return ("skip", None)
+            self.count_reject += 1
+            self.selection_tracker.record("reject", stream_item.categories)
+            return ("reject", meta)
 
     def get_stats(self) -> Dict[str, Any]:
-        total = self.count_train + self.count_store + self.count_skip
-        avg_loss = self.total_loss / max(len(self.loss_history), 1)
-
-        stats = {
-            "count_train": self.count_train,
-            "count_store": self.count_store,
-            "count_skip": self.count_skip,
-            "train_rate": self.count_train / max(total, 1),
-            "avg_loss": avg_loss,
+        total = self.count_accept + self.count_reject
+        return {
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
-            "adaptive": self.adaptive,
+            "mode": self.mode,
+            "accept_fraction": self.accept_fraction,
+            "current_threshold": self._get_threshold(),
         }
 
-        if self.adaptive:
-            stats["train_fraction"] = self.train_fraction
-            stats["current_threshold"] = self._get_adaptive_threshold()
-            stats["loss_window_size"] = len(self.loss_history)
-        else:
-            stats["tau_loss"] = self.tau_loss
-
-        return stats
-
 
 # =============================================================================
-# TopKPolicy
+# UncertaintyBasedPolicy
 # =============================================================================
 
 
-class TopKPolicy(FilterPolicy):
+class UncertaintyBasedPolicy(FilterPolicy):
     """
-    Top-K difficulty-based policy.
+    Prediction-uncertainty-based selective training policy.
 
-    Maintains a sliding window and trains on items whose loss is among the
-    top-K highest in the current window. This provides a relative (rather
-    than absolute) selection criterion.
+    Runs inference on each frame and measures prediction uncertainty:
+    the fewer high-confidence detections the model produces, the more
+    uncertain it is about the frame content.
+
+    Uncertainty score = 1 - (mean of top-K detection scores).
+    Frames where the model is most uncertain are accepted.
 
     Args:
-        window_size: Size of the sliding window.
-        k: Number of items to train on per window.
+        accept_fraction: Fraction of items to accept (highest uncertainty).
+        score_window_size: Size of the sliding window for adaptive thresholding.
+        warmup_items: Accept all items unconditionally during warmup.
+        confidence_threshold: Minimum detection score to consider.
+        top_k_detections: How many top detections to average for the
+            confidence estimate.
     """
 
     def __init__(
         self,
-        window_size: int = 100,
-        k: int = 30,
+        accept_fraction: float = 0.3,
+        score_window_size: int = 500,
+        warmup_items: int = 100,
+        confidence_threshold: float = 0.1,
+        top_k_detections: int = 5,
     ):
         super().__init__()
-        self.window_size = window_size
-        self.k = k
+        self.accept_fraction = accept_fraction
+        self.score_window_size = score_window_size
+        self.warmup_items = warmup_items
+        self.confidence_threshold = confidence_threshold
+        self.top_k_detections = top_k_detections
 
-        # Sliding window: stores only loss values (not full items)
-        self.loss_window: deque = deque(maxlen=window_size)
-
-        # Statistics
-        self.count_train = 0
-        self.count_skip = 0
+        self.score_history: deque = deque(maxlen=score_window_size)
         self.items_seen = 0
+        self.count_accept = 0
+        self.count_reject = 0
 
+    def _compute_uncertainty(self, predictions: Dict[str, torch.Tensor]) -> float:
+        """Compute uncertainty from detection predictions."""
+        scores = predictions["scores"]
+        scores = scores[scores >= self.confidence_threshold]
+
+        if len(scores) == 0:
+            return 1.0  # max uncertainty: no detections at all
+
+        top_scores = scores[: self.top_k_detections]
+        mean_conf = float(top_scores.mean().item())
+        return 1.0 - mean_conf
+
+    def _get_threshold(self) -> float:
+        if len(self.score_history) == 0:
+            return 0.0
+        sorted_scores = sorted(self.score_history)
+        idx = int(len(sorted_scores) * (1.0 - self.accept_fraction))
+        idx = min(idx, len(sorted_scores) - 1)
+        return sorted_scores[idx]
+
+    @torch.no_grad()
     def select_action(
         self,
         stream_item: StreamItem,
         model: nn.Module,
-        criterion: nn.Module,
         device: torch.device,
     ) -> FilterResult:
         self.items_seen += 1
 
-        # Compute loss with grad so training loop can reuse it when we select train
-        loss = _compute_item_loss_tensor(
-            stream_item, model, criterion, device
-        )
-        loss_value = loss.item()
+        was_training = model.training
+        model.eval()
 
-        # Add to window
-        self.loss_window.append(loss_value)
+        image = stream_item.image.to(device)
+        predictions = model([image])[0]
 
-        # During initial fill, train on everything
-        if len(self.loss_window) < self.window_size:
-            self.count_train += 1
-            self.selection_tracker.record(
-                "train", stream_item.target, loss_value
-            )
-            return ("train", loss)
+        if was_training:
+            model.train()
 
-        # Check if current loss is >= the K-th highest loss in window
-        sorted_losses = sorted(self.loss_window, reverse=True)
-        kth_loss = sorted_losses[min(self.k - 1, len(sorted_losses) - 1)]
+        uncertainty = self._compute_uncertainty(predictions)
+        self.score_history.append(uncertainty)
 
-        if loss_value >= kth_loss:
-            self.count_train += 1
-            self.selection_tracker.record(
-                "train", stream_item.target, loss_value
-            )
-            return ("train", loss)
+        meta = {"uncertainty": uncertainty}
+
+        if self.items_seen <= self.warmup_items:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
+
+        threshold = self._get_threshold()
+        meta["threshold"] = threshold
+
+        if uncertainty >= threshold:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
         else:
-            self.count_skip += 1
-            self.selection_tracker.record("skip", stream_item.target, loss_value)
-            return ("skip", None)
+            self.count_reject += 1
+            self.selection_tracker.record("reject", stream_item.categories)
+            return ("reject", meta)
 
     def get_stats(self) -> Dict[str, Any]:
-        total = self.count_train + self.count_skip
+        total = self.count_accept + self.count_reject
         return {
-            "count_train": self.count_train,
-            "count_skip": self.count_skip,
-            "train_rate": self.count_train / max(total, 1),
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
-            "window_size": self.window_size,
-            "k": self.k,
+            "accept_fraction": self.accept_fraction,
+            "current_threshold": self._get_threshold(),
         }
 
 
@@ -686,132 +465,101 @@ class GradientNormPolicy(FilterPolicy):
     Gradient-norm selective training policy.
 
     Computes the L2 norm of per-sample parameter gradients as an importance
-    score and selects items with the highest norms for training. Gradient
-    norm captures how much a sample would move the model parameters, which
-    can differ from loss (e.g. high loss on a flat region produces small
-    gradients while moderate loss on a steep region produces large ones).
-
-    Uses torch.autograd.grad with retain_graph=True so the loss tensor's
-    computation graph is preserved for the training loop's backward pass,
-    avoiding a redundant forward. The autograd.grad call does not populate
-    parameter .grad attributes, so gradient accumulation is unaffected.
-
-    Supports the same adaptive (percentile-based) and fixed thresholding
-    modes as DifficultyBasedPolicy.
+    score and selects items with the highest norms for training.  Gradient
+    norm captures how much a sample would move the model parameters.
 
     Args:
-        adaptive: If True, use percentile-based adaptive thresholding.
-        train_fraction: Fraction of items to train on (only if adaptive).
-            E.g. 0.3 means train on the ~30% highest-norm items.
-        norm_window_size: Size of the sliding window for gradient norm
-            history (only if adaptive).
-        warmup_items: Number of items to train on unconditionally before
-            applying the adaptive threshold, to build up a norm distribution.
-        tau_norm: Absolute gradient norm threshold (only if not adaptive).
-        store_skipped: If True, skipped items get action "store" instead
-            of "skip".
+        accept_fraction: Fraction of items to accept (highest gradient norm).
+        norm_window_size: Sliding window for adaptive thresholding.
+        warmup_items: Accept all items during warmup.
     """
 
     def __init__(
         self,
-        adaptive: bool = True,
-        train_fraction: float = 0.3,
+        accept_fraction: float = 0.3,
         norm_window_size: int = 500,
         warmup_items: int = 200,
-        tau_norm: float = 0.0,
-        store_skipped: bool = False,
     ):
         super().__init__()
-        self.adaptive = adaptive
-        self.train_fraction = train_fraction
+        self.accept_fraction = accept_fraction
         self.norm_window_size = norm_window_size
         self.warmup_items = warmup_items
-        self.tau_norm = tau_norm
-        self.store_skipped = store_skipped
 
         self.norm_history: deque = deque(maxlen=norm_window_size)
-
-        self.count_train = 0
-        self.count_store = 0
-        self.count_skip = 0
         self.items_seen = 0
-        self.total_norm = 0.0
+        self.count_accept = 0
+        self.count_reject = 0
 
-    def _get_adaptive_threshold(self) -> float:
-        """
-        Compute the adaptive gradient norm threshold from norm history.
+    def _compute_gradient_norm(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        device: torch.device,
+    ) -> float:
+        model.train()
+        image = stream_item.image.to(device)
+        target = {
+            "boxes": stream_item.annotations["boxes"].to(device),
+            "labels": stream_item.annotations["labels"].to(device),
+        }
+        loss_dict = model([image], [target])
+        loss = sum(loss_dict.values())
 
-        Returns the (1 - train_fraction) percentile of recent norms.
-        E.g. if train_fraction=0.3, returns the 70th percentile, so items
-        with norm above this value (top 30%) will be trained on.
-        """
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        grads = torch.autograd.grad(
+            loss, trainable_params, retain_graph=False, allow_unused=True,
+        )
+        total = 0.0
+        for g in grads:
+            if g is not None:
+                total += g.pow(2).sum().item()
+        return total ** 0.5
+
+    def _get_threshold(self) -> float:
         if len(self.norm_history) == 0:
             return 0.0
-
         sorted_norms = sorted(self.norm_history)
-        percentile_idx = int(len(sorted_norms) * (1.0 - self.train_fraction))
-        percentile_idx = min(percentile_idx, len(sorted_norms) - 1)
-        return sorted_norms[percentile_idx]
+        idx = int(len(sorted_norms) * (1.0 - self.accept_fraction))
+        idx = min(idx, len(sorted_norms) - 1)
+        return sorted_norms[idx]
 
     def select_action(
         self,
         stream_item: StreamItem,
         model: nn.Module,
-        criterion: nn.Module,
         device: torch.device,
     ) -> FilterResult:
         self.items_seen += 1
 
-        loss = _compute_item_loss_tensor(
-            stream_item, model, criterion, device
-        )
-        loss_value = loss.item()
-
-        grad_norm = _compute_gradient_norm(loss, model)
-        self.total_norm += grad_norm
+        grad_norm = self._compute_gradient_norm(stream_item, model, device)
         self.norm_history.append(grad_norm)
 
-        if self.adaptive and self.items_seen <= self.warmup_items:
-            self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return ("train", loss)
+        meta = {"grad_norm": grad_norm}
 
-        threshold = self._get_adaptive_threshold() if self.adaptive else self.tau_norm
+        if self.items_seen <= self.warmup_items:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
 
-        if grad_norm > threshold:
-            self.count_train += 1
-            self.selection_tracker.record("train", stream_item.target, loss_value)
-            return ("train", loss)
+        threshold = self._get_threshold()
+        meta["threshold"] = threshold
+
+        if grad_norm >= threshold:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", meta)
         else:
-            if self.store_skipped:
-                self.count_store += 1
-                self.selection_tracker.record(
-                    "store", stream_item.target, loss_value
-                )
-                return ("store", None)
-            self.count_skip += 1
-            self.selection_tracker.record("skip", stream_item.target, loss_value)
-            return ("skip", None)
+            self.count_reject += 1
+            self.selection_tracker.record("reject", stream_item.categories)
+            return ("reject", meta)
 
     def get_stats(self) -> Dict[str, Any]:
-        total = self.count_train + self.count_store + self.count_skip
-        avg_norm = self.total_norm / max(self.items_seen, 1)
-
-        stats: Dict[str, Any] = {
-            "count_train": self.count_train,
-            "count_store": self.count_store,
-            "count_skip": self.count_skip,
-            "train_rate": self.count_train / max(total, 1),
-            "avg_grad_norm": avg_norm,
+        total = self.count_accept + self.count_reject
+        return {
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
-            "adaptive": self.adaptive,
+            "accept_fraction": self.accept_fraction,
+            "current_threshold": self._get_threshold(),
         }
-
-        if self.adaptive:
-            stats["train_fraction"] = self.train_fraction
-            stats["current_threshold"] = self._get_adaptive_threshold()
-            stats["norm_window_size"] = len(self.norm_history)
-        else:
-            stats["tau_norm"] = self.tau_norm
-
-        return stats

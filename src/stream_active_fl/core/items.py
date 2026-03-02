@@ -3,12 +3,12 @@ Core data structures for stream learning.
 
 Defines the StreamItem class, the fundamental unit of data flowing through
 the streaming pipeline. Each StreamItem represents a single camera frame
-with its associated labels and metadata.
+with its associated detection annotations and metadata.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import torch
 
@@ -17,66 +17,52 @@ class StreamItem:
     """
     A single camera frame in the data stream.
 
-    Carries both classification and detection information so the same
-    StreamItem can be consumed by either pipeline:
-
-    - Classification: Uses image, target (binary 0/1), and teacher_score
-      (max pseudo-label confidence for the target category).
-    - Detection: Additionally uses annotations, a dict with "boxes"
-      (FloatTensor[N, 4] in xyxy format) and "labels" (Int64Tensor[N],
-      1-indexed with 0 reserved for background).
+    Carries detection annotations so the same StreamItem can be consumed by
+    the bootstrap trainer, the streaming filter, and the training buffer.
 
     Attributes:
         image: Image tensor of shape (C, H, W).
-        target: Binary label (1.0 = at least one object present, 0.0 = empty).
-        teacher_score: Maximum pseudo-label confidence score for the frame
-            (0.0 when no detections exist).
-        metadata: Dict with provenance info (seq_id, frame_idx, etc.).
-        annotations: Detection targets, or None for classification-only items.
+        annotations: Detection targets with "boxes" (FloatTensor[N, 4] xyxy)
+            and "labels" (Int64Tensor[N], 1-indexed with 0 reserved for
+            background).
+        categories: Set of category *names* present in this frame (e.g.
+            {"Vehicle", "Pedestrian"}). Used by the NoveltyTracker to
+            decide whether a frame introduces a previously-unseen class.
+        metadata: Dict with provenance info (frame_id, global_idx, etc.).
     """
 
-    __slots__ = ("image", "target", "teacher_score", "metadata", "annotations")
+    __slots__ = ("image", "annotations", "categories", "metadata")
 
     def __init__(
         self,
         image: torch.Tensor,
-        target: float,
-        teacher_score: float,
+        annotations: Dict[str, torch.Tensor],
+        categories: Set[str],
         metadata: Dict[str, Any],
-        annotations: Optional[Dict[str, torch.Tensor]] = None,
     ):
         self.image = image
-        self.target = target
-        self.teacher_score = teacher_score
-        self.metadata = metadata
         self.annotations = annotations
+        self.categories = categories
+        self.metadata = metadata
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary format for replay buffer storage."""
-        d: Dict[str, Any] = {
+        """Convert to plain-dict format (e.g. for buffer storage)."""
+        return {
             "image": self.image,
-            "target": torch.tensor(self.target, dtype=torch.float32),
-            "teacher_score": self.teacher_score,
-            "metadata": self.metadata,
-        }
-        if self.annotations is not None:
-            d["annotations"] = {
+            "annotations": {
                 "boxes": self.annotations["boxes"],
                 "labels": self.annotations["labels"],
-            }
-        return d
+            },
+            "categories": self.categories,
+            "metadata": self.metadata,
+        }
 
     def __repr__(self) -> str:
         shape = tuple(self.image.shape) if isinstance(self.image, torch.Tensor) else "?"
-        n_boxes = len(self.annotations["boxes"]) if self.annotations is not None else None
-        parts = [
-            f"image={shape}",
-            f"target={self.target}",
-            f"teacher_score={self.teacher_score:.2f}",
-        ]
-        if n_boxes is not None:
-            parts.append(f"boxes={n_boxes}")
-        seq_id = self.metadata.get("seq_id", "?")
-        frame_idx = self.metadata.get("frame_idx", "?")
-        parts.append(f"seq={seq_id}[{frame_idx}]")
-        return f"StreamItem({', '.join(parts)})"
+        n_boxes = len(self.annotations["boxes"])
+        frame_id = self.metadata.get("frame_id", "?")
+        cats = ",".join(sorted(self.categories)) if self.categories else "none"
+        return (
+            f"StreamItem(image={shape}, boxes={n_boxes}, "
+            f"cats=[{cats}], frame={frame_id})"
+        )

@@ -1,33 +1,31 @@
 # stream-active-FL
 
-Experimental code for a master thesis on **client-side filtering** for continuous learning from streaming perception data in a federated setting. For each incoming stream item, the system decides whether to train, store for replay, or skip, using model-driven selection criteria.
+Buffer-based streaming active learning for object detection on ZOD Frames.
 
-## Quick start
-
-From the repo root:
+## Quick Start
 
 ```bash
-# Offline classification baseline (upper bound)
-python experiments/offline_classification.py --config configs/classification/offline.yaml
-
-# Streaming classification with replay
-python experiments/streaming_classification.py --config configs/classification/streaming_no_filter.yaml
-```
-
-Detection experiments use `experiments/streaming_detection.py` and `configs/detection/streaming_*.yaml`.
-
-## Install
-
-Dependencies are in `pyproject.toml`. From the repo root:
-
-```bash
+# 1. Install
 pip install -e .
+
+# 2. Preprocess ZOD Frames (crop + resize + extract annotations)
+python tools/preprocessing/prepare_data.py \
+    --zod-root /path/to/zod \
+    --version full
+
+# 3. Run an experiment
+python experiments/streaming_detection.py \
+    --config configs/detection/no_filter.yaml
 ```
 
-## Status
+## Experiments
 
-Early experimental. Codebase and configs are under active development.
+### Offline baseline
 
-## License
+Multi-epoch shuffled training on the full dataset:
 
-See [LICENSE](LICENSE).
+```bash
+python experiments/offline_baseline.py \
+    --config configs/detection/offline_baseline.yaml
+```
+

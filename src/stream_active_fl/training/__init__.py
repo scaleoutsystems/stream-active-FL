@@ -1,27 +1,23 @@
 """
-Training abstractions and loops.
+Training loops for the two-phase streaming detection pipeline.
 
-Reusable training logic for different learning paradigms:
-- Streaming: Online training from temporal data streams
-- Federated: Server-side aggregation (FedAvg) for simulated FL
+- Bootstrap: multi-epoch supervised training on initial frames
+- Streaming: single-pass buffer-based training with filtering
+- Federated: FedAvg aggregation (kept for future use)
 """
 
 from .federated import fedavg
 from .streaming import (
-    RunningPosWeight,
     StreamingTrainResult,
-    perform_classification_update,
-    perform_detection_update,
-    train_on_classification_stream,
-    train_on_detection_stream,
+    bootstrap_train,
+    collect_embeddings,
+    train_on_stream,
 )
 
 __all__ = [
-    "RunningPosWeight",
     "StreamingTrainResult",
+    "bootstrap_train",
+    "collect_embeddings",
     "fedavg",
-    "perform_classification_update",
-    "perform_detection_update",
-    "train_on_classification_stream",
-    "train_on_detection_stream",
+    "train_on_stream",
 ]

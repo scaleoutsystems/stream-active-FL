@@ -1,6 +1,6 @@
-"""Stream Active Federated Learning package."""
+"""Stream Active Federated Learning for object detection."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from stream_active_fl import (
     core,
