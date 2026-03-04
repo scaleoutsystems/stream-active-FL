@@ -91,6 +91,7 @@ def save_run_info(
     best_epoch: Optional[int] = None,
     best_metric: Optional[float] = None,
     best_metric_name: str = "val_f1",
+    metric_key: Optional[str] = None,
     dataset_info: Optional[Dict[str, Any]] = None,
     extra_info: Optional[Dict[str, Any]] = None,
     repo_path: Optional[Path] = None,
@@ -106,13 +107,20 @@ def save_run_info(
         end_time: Experiment end time (None if still running).
         best_epoch: Epoch with best metric.
         best_metric: Best metric value achieved.
-        best_metric_name: Name of the metric being tracked.
+        best_metric_name: Name of the metric (used when metric_key is None).
+        metric_key: Override key for the metric. If None, uses "best_{best_metric_name}".
+            Use e.g. "final_val_mAP" when storing a final (not best) value.
         dataset_info: Optional dataset statistics.
         extra_info: Optional additional info to include.
         repo_path: Path to git repository for commit info.
     """
     git_info = get_git_info(repo_path)
     env_info = get_environment_info()
+
+    if metric_key is not None:
+        metric_field = metric_key
+    else:
+        metric_field = f"best_{best_metric_name}"
 
     run_info = {
         "git_commit": git_info["commit"],
@@ -125,7 +133,7 @@ def save_run_info(
         "environment": env_info,
         "dataset_info": dataset_info,
         "best_epoch": best_epoch,
-        f"best_{best_metric_name}": best_metric,
+        metric_field: best_metric,
     }
 
     if extra_info:

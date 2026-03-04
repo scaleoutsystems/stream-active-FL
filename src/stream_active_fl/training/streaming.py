@@ -288,7 +288,11 @@ def train_on_stream(
             buffer_stats = training_buffer.get_stats()
             novelty_stats = novelty_tracker.get_stats() if novelty_tracker else None
             metrics_logger.log_checkpoint(
-                checkpoint_idx, filter_stats, buffer_stats, novelty_stats,
+                checkpoint_idx,
+                optimizer_steps,
+                filter_stats,
+                buffer_stats,
+                novelty_stats,
             )
 
             selection_stats = filter_policy.get_selection_stats()

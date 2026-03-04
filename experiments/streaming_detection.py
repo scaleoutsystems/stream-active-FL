@@ -483,7 +483,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         start_time=start_time,
         end_time=datetime.now(),
         best_metric=final_metrics["mAP"],
-        best_metric_name="final_val_mAP",
+        metric_key="final_val_mAP",
         dataset_info=dataset_info,
         repo_path=PROJECT_ROOT,
     )

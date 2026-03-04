@@ -3,28 +3,37 @@ Metrics tracking for federated streaming experiments.
 
 Logs per-round server evaluation metrics and per-client training counts
 to a single CSV file (rounds.csv).
+
+Detection columns align with offline (epochs.csv) and streaming (checkpoints.csv):
+- Aggregate: mAP, mAP_50, mAP_75
+- Counts: num_items, total_predictions, total_ground_truth
+- Per-class: AP_Vehicle, AP_VulnerableVehicle, ... (from CATEGORY_ID_TO_NAME)
 """
 
 from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+from ..core import CATEGORY_ID_TO_NAME
 
-# Column definitions per task
-_CLASSIFICATION_EVAL_COLS = [
-    "eval_loss", "eval_accuracy", "eval_precision", "eval_recall", "eval_f1",
+_CLASSIFICATION_EVAL_COLS: List[str] = ["loss", "accuracy", "precision", "recall", "f1"]
+_CLASSIFICATION_EVAL_KEYS: List[str] = ["loss", "accuracy", "precision", "recall", "f1"]
+_DETECTION_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
+_DETECTION_PER_CLASS_AP_COLS: List[str] = [
+    f"AP_{name}" for name in CATEGORY_ID_TO_NAME.values()
 ]
-_CLASSIFICATION_EVAL_KEYS = ["loss", "accuracy", "precision", "recall", "f1"]
-
-_DETECTION_EVAL_COLS = [
-    "eval_mAP", "eval_mAP_50", "eval_mAP_75",
-    "eval_AP_Vehicle", "eval_AP_Pedestrian", "eval_AP_VulnerableVehicle",
-]
-_DETECTION_EVAL_KEYS = [
-    "mAP", "mAP_50", "mAP_75", "AP_Vehicle", "AP_Pedestrian", "AP_VulnerableVehicle",
-]
+_DETECTION_EVAL_COLS: List[str] = (
+    ["mAP", "mAP_50", "mAP_75"]
+    + _DETECTION_COUNT_COLS
+    + _DETECTION_PER_CLASS_AP_COLS
+)
+_DETECTION_EVAL_KEYS: List[str] = (
+    ["mAP", "mAP_50", "mAP_75"]
+    + _DETECTION_COUNT_COLS
+    + _DETECTION_PER_CLASS_AP_COLS
+)
 
 
 class FederatedMetricsLogger:
