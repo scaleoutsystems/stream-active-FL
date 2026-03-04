@@ -84,6 +84,9 @@ class StreamingMetricsLogger:
                 "categories_seen",
                 "novel_total",
                 "redundant_total",
+                "empty_total",
+                "empty_accepted",
+                "empty_rejected",
             ])
 
         with open(self.checkpoints_file, "w", newline="") as f:
@@ -179,6 +182,9 @@ class StreamingMetricsLogger:
         categories_seen = novelty_stats.get("categories_seen", 0) if novelty_stats else 0
         novel_total = novelty_stats.get("novel_total", 0) if novelty_stats else 0
         redundant_total = novelty_stats.get("redundant_total", 0) if novelty_stats else 0
+        empty_total = novelty_stats.get("empty_total", 0) if novelty_stats else 0
+        empty_accepted = novelty_stats.get("empty_accepted", 0) if novelty_stats else 0
+        empty_rejected = novelty_stats.get("empty_rejected", 0) if novelty_stats else 0
 
         self.last_optimizer_steps = optimizer_steps
 
@@ -200,6 +206,9 @@ class StreamingMetricsLogger:
                 categories_seen,
                 novel_total,
                 redundant_total,
+                empty_total,
+                empty_accepted,
+                empty_rejected,
             ])
 
     def log_filter_stats(

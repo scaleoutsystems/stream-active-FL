@@ -107,6 +107,7 @@ class NoveltyTracker:
             ),
             "empty_total": self.empty_total,
             "empty_accepted": self.empty_accepted,
+            "empty_rejected": self.empty_rejected,
         }
 
     def print_summary(self) -> None:
@@ -122,6 +123,7 @@ class NoveltyTracker:
         print(f"  Redundant frames   : {stats['redundant_total']} "
               f"(accepted: {stats['redundant_accepted']}, rejected: {stats['redundant_rejected']})")
         print(f"  Redundant rej rate : {stats['redundant_reject_rate']:.4f}")
-        print(f"  Empty frames       : {stats['empty_total']}")
+        print(f"  Empty frames       : {stats['empty_total']} "
+              f"(accepted: {stats['empty_accepted']}, rejected: {stats['empty_rejected']})")
         print("=" * 60)
         print()
