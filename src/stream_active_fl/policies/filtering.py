@@ -6,6 +6,7 @@ buffer) or rejected (discarded).
 
 Available policies:
 - NoFilterPolicy: Accept every item (unfiltered baseline)
+- RandomPolicy: Accept each item with fixed probability (random baseline)
 - DistributionBasedPolicy: Accept items whose backbone embedding falls on the
   tail of the distribution seen so far (novel / unusual frames)
 - UncertaintyBasedPolicy: Accept items where the model's detection confidence
@@ -18,6 +19,7 @@ dict carries information for logging (e.g. the score used for the decision).
 
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
@@ -162,6 +164,55 @@ class NoFilterPolicy(FilterPolicy):
 
     def get_stats(self) -> Dict[str, Any]:
         return {"count_accept": self.count, "accept_rate": 1.0}
+
+
+# =============================================================================
+# RandomPolicy
+# =============================================================================
+
+
+class RandomPolicy(FilterPolicy):
+    """
+    Random baseline: accept each item with fixed probability.
+
+    Accepts items with probability accept_fraction, independent of content.
+    Used to compare whether content-based filtering outperforms random selection.
+
+    Args:
+        accept_fraction: Probability of accepting each item (e.g. 0.3 = 30%).
+    """
+
+    def __init__(self, accept_fraction: float = 0.3):
+        super().__init__()
+        self.accept_fraction = accept_fraction
+        self.count_accept = 0
+        self.count_reject = 0
+
+    def select_action(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        device: torch.device,
+    ) -> FilterResult:
+        r = random.random()
+        is_accepted = r < self.accept_fraction
+        if is_accepted:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            return ("accept", {"random_score": r})
+        else:
+            self.count_reject += 1
+            self.selection_tracker.record("reject", stream_item.categories)
+            return ("reject", {"random_score": r})
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self.count_accept + self.count_reject
+        return {
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
+            "accept_fraction": self.accept_fraction,
+        }
 
 
 # =============================================================================

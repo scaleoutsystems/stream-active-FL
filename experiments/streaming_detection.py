@@ -94,7 +94,7 @@ class StreamingDetectionConfig:
     color_jitter: bool = True
 
     # Filtering policy
-    filter_policy: Literal["none", "distribution", "uncertainty", "gradient_norm"] = "none"
+    filter_policy: Literal["none", "random", "distribution", "uncertainty", "gradient_norm"] = "none"
     accept_fraction: float = 0.3
     warmup_items: int = 200
     score_window_size: int = 500

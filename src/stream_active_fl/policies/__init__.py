@@ -6,6 +6,7 @@ training buffer) or rejected (discarded).
 
 Available policies:
     NoFilterPolicy             Accept every item (baseline)
+    RandomPolicy               Accept each item with fixed probability (random baseline)
     DistributionBasedPolicy    Accept items on the tail of the embedding distribution
     UncertaintyBasedPolicy     Accept items with high prediction uncertainty
     GradientNormPolicy         Accept items with largest parameter gradient norms
@@ -27,6 +28,7 @@ from .filtering import (
     FilterResult,
     GradientNormPolicy,
     NoFilterPolicy,
+    RandomPolicy,
     UncertaintyBasedPolicy,
 )
 
@@ -52,6 +54,9 @@ def create_filter_policy(
     """
     if config.filter_policy == "none":
         return NoFilterPolicy()
+
+    elif config.filter_policy == "random":
+        return RandomPolicy(accept_fraction=config.accept_fraction)
 
     elif config.filter_policy == "distribution":
         if bootstrap_mean is None:
@@ -98,6 +103,7 @@ __all__ = [
     "FilterResult",
     "GradientNormPolicy",
     "NoFilterPolicy",
+    "RandomPolicy",
     "UncertaintyBasedPolicy",
     "create_filter_policy",
 ]

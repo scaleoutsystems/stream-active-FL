@@ -248,7 +248,10 @@ def train_on_stream(
                 global_idx=stream_item.metadata.get("global_idx", items_processed - 1),
                 frame_id=stream_item.metadata.get("frame_id", ""),
                 action=action,
-                filter_score=meta.get("score", meta.get("uncertainty", meta.get("grad_norm", 0.0))),
+                filter_score=meta.get(
+                    "score",
+                    meta.get("uncertainty", meta.get("grad_norm", meta.get("random_score", 0.0))),
+                ),
                 categories=stream_item.categories,
                 is_novel=(novelty_tracker.last_was_novel if novelty_tracker else False),
             )
