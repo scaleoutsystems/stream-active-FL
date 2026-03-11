@@ -117,7 +117,9 @@ class StreamingMetricsLogger:
                 "elapsed_seconds",
                 "frame_id",
                 "action",
+                "filter_metric",
                 "filter_score",
+                "filter_threshold",
                 "categories",
                 "is_novel",
             ])
@@ -139,14 +141,16 @@ class StreamingMetricsLogger:
     def log_decision(
         self,
         global_idx: int,
+        checkpoint_idx: int,
         frame_id: str,
         action: str,
+        filter_metric: str,
         filter_score: float,
+        filter_threshold: Optional[float],
         categories: Set[str],
         is_novel: bool,
     ) -> None:
         """Log a per-frame accept/reject decision."""
-        checkpoint_idx = 1 + (global_idx // self.checkpoint_interval)
         elapsed = time.time() - self.start_time
         with open(self.decisions_file, "a", newline="") as f:
             csv.writer(f).writerow([
@@ -155,7 +159,9 @@ class StreamingMetricsLogger:
                 f"{elapsed:.2f}",
                 frame_id,
                 action,
+                filter_metric,
                 f"{filter_score:.6f}",
+                (f"{filter_threshold:.6f}" if filter_threshold is not None else ""),
                 ";".join(sorted(categories)) if categories else "",
                 int(is_novel),
             ])

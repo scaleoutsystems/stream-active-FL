@@ -5,6 +5,7 @@ __version__ = "0.2.0"
 from stream_active_fl import (
     core,
     evaluation,
+    experiment,
     logging,
     memory,
     models,
@@ -16,6 +17,7 @@ from stream_active_fl import (
 __all__ = [
     "core",
     "evaluation",
+    "experiment",
     "logging",
     "memory",
     "models",

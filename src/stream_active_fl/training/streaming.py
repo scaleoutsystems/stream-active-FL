@@ -126,7 +126,7 @@ def collect_embeddings(
     data_loader: DataLoader,
     device: torch.device,
     progress_bar: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
     """
     Collect backbone embeddings for all frames in a DataLoader.
 
@@ -141,7 +141,8 @@ def collect_embeddings(
         progress_bar: Show progress bar.
 
     Returns:
-        (mean, cov): Mean vector (D,) and covariance matrix (D, D).
+        (mean, cov, count): Mean vector (D,), covariance matrix (D, D),
+        and number of embeddings used.
     """
     all_embeddings: List[torch.Tensor] = []
 
@@ -161,7 +162,7 @@ def collect_embeddings(
     centered = embeddings - mean.unsqueeze(0)
     cov = (centered.T @ centered) / max(len(embeddings) - 1, 1)
 
-    return mean, cov
+    return mean, cov, int(len(embeddings))
 
 
 # =============================================================================
@@ -223,6 +224,30 @@ def train_on_stream(
     optimizer_steps = 0
     checkpoint_idx = 0
 
+    def _train_on_current_buffer() -> None:
+        nonlocal optimizer_steps
+        model.train()
+        images, targets = training_buffer.get_batch()
+        images = [img.to(device) for img in images]
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+        for _ in range(train_steps_per_buffer):
+            optimizer.zero_grad()
+            loss_dict = model(images, targets)
+            loss = sum(loss_dict.values())
+            loss.backward()
+
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    max_grad_norm,
+                )
+
+            optimizer.step()
+            optimizer_steps += 1
+
+        training_buffer.clear()
+
     pbar = tqdm(stream, desc="Streaming", total=total_items) if progress_bar else stream
 
     for stream_item in pbar:
@@ -242,46 +267,40 @@ def train_on_stream(
 
         # Log per-item decision
         if metrics_logger is not None:
-            forward_pass = True  # filter policies always inspect the item
+            forward_pass = filter_policy.requires_model_forward()
+            if "score" in meta:
+                filter_metric = "distribution_score"
+                filter_score = float(meta["score"])
+            elif "uncertainty" in meta:
+                filter_metric = "uncertainty"
+                filter_score = float(meta["uncertainty"])
+            elif "grad_norm" in meta:
+                filter_metric = "grad_norm"
+                filter_score = float(meta["grad_norm"])
+            elif "random_score" in meta:
+                filter_metric = "random_score"
+                filter_score = float(meta["random_score"])
+            else:
+                filter_metric = "none"
+                filter_score = 0.0
+            filter_threshold = float(meta["threshold"]) if "threshold" in meta else None
+
             metrics_logger.log_stream_item(action, forward_pass=forward_pass)
             metrics_logger.log_decision(
                 global_idx=stream_item.metadata.get("global_idx", items_processed - 1),
+                checkpoint_idx=1 + ((items_processed - 1) // metrics_logger.checkpoint_interval),
                 frame_id=stream_item.metadata.get("frame_id", ""),
                 action=action,
-                filter_score=meta.get(
-                    "score",
-                    meta.get("uncertainty", meta.get("grad_norm", meta.get("random_score", 0.0))),
-                ),
+                filter_metric=filter_metric,
+                filter_score=filter_score,
+                filter_threshold=filter_threshold,
                 categories=stream_item.categories,
                 is_novel=(novelty_tracker.last_was_novel if novelty_tracker else False),
             )
 
         # Train when buffer is full
         if training_buffer.is_full():
-            model.train()
-            images, targets = training_buffer.get_batch()
-            images = [img.to(device) for img in images]
-            targets = [
-                {k: v.to(device) for k, v in t.items()}
-                for t in targets
-            ]
-
-            for _ in range(train_steps_per_buffer):
-                optimizer.zero_grad()
-                loss_dict = model(images, targets)
-                loss = sum(loss_dict.values())
-                loss.backward()
-
-                if max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in model.parameters() if p.requires_grad],
-                        max_grad_norm,
-                    )
-
-                optimizer.step()
-                optimizer_steps += 1
-
-            training_buffer.clear()
+            _train_on_current_buffer()
 
         # Checkpoint and evaluation
         if metrics_logger is not None and metrics_logger.should_checkpoint():
@@ -311,6 +330,10 @@ def train_on_stream(
                         "mAP": f"{eval_metrics.get('mAP', 0.0):.3f}",
                         "accept": f"{filter_stats.get('accept_rate', 1.0):.2f}",
                     })
+
+    # Final partial-buffer flush to avoid dropping accepted tail items.
+    if len(training_buffer) > 0:
+        _train_on_current_buffer()
 
     return StreamingTrainResult(
         items_processed=items_processed,

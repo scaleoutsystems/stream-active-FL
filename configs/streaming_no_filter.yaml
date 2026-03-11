@@ -1,9 +1,8 @@
-# Streaming detection: random baseline (accept fixed fraction at random)
-# Compare content-based filtering vs random selection
+# Streaming detection: no filtering baseline (accept all)
 
 # Paths
 manifest_path: "data/Frames_1280x720/manifest.json"
-output_dir: "outputs/random_filter"
+output_dir: "outputs/streaming/no_filter"
 
 # Model
 num_classes: 11
@@ -33,9 +32,8 @@ augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: random accept with probability accept_fraction
-filter_policy: "random"
-accept_fraction: 0.3
+# Filtering
+filter_policy: "none"
 
 # Evaluation
 eval_every_n_items: 5000

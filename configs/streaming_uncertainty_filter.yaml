@@ -1,9 +1,9 @@
-# Streaming detection: distribution-based filtering
-# Accepts frames whose backbone embedding is on the tail of the distribution
+# Streaming detection: uncertainty-based filtering
+# Accepts frames where the model's detection confidence is low
 
 # Paths
 manifest_path: "data/Frames_1280x720/manifest.json"
-output_dir: "outputs/distribution_filter"
+output_dir: "outputs/streaming/uncertainty_filter"
 
 # Model
 num_classes: 11
@@ -34,14 +34,12 @@ hflip_prob: 0.5
 color_jitter: true
 
 # Filtering
-filter_policy: "distribution"
+filter_policy: "uncertainty"
 accept_fraction: 0.3
 warmup_items: 200
 score_window_size: 500
-distribution_mode: "mahalanobis"
-embedding_buffer_size: 1000
-knn_k: 10
-update_distribution_stats: true
+confidence_threshold: 0.1
+top_k_detections: 5
 
 # Evaluation
 eval_every_n_items: 5000

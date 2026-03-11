@@ -15,7 +15,7 @@ python tools/preprocessing/prepare_data.py \
 
 # 3. Run an experiment
 python experiments/streaming_detection.py \
-    --config configs/detection/no_filter.yaml
+    --config configs/streaming_no_filter.yaml
 ```
 
 ## Experiments
@@ -26,6 +26,31 @@ Multi-epoch shuffled training on the full dataset:
 
 ```bash
 python experiments/offline_baseline.py \
-    --config configs/detection/offline_baseline.yaml
+    --config configs/offline_baseline.yaml
 ```
 
+### Streaming (single-machine)
+
+Two-phase streaming experiment (bootstrap + online filtering):
+
+```bash
+python experiments/streaming_detection.py \
+    --config configs/streaming_distribution_filter.yaml
+```
+
+### Federated streaming (simulated FL)
+
+Server-side FedAvg over client-local streaming updates:
+
+```bash
+python experiments/federated_detection.py \
+    --config configs/federated_no_filter.yaml
+```
+
+You can reuse a shared bootstrap from any previous streaming run:
+
+```bash
+python experiments/federated_detection.py \
+    --config configs/federated_no_filter.yaml \
+    --bootstrap-run-dir outputs/streaming/no_filter/<run_id>
+```

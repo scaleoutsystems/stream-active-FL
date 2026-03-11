@@ -70,7 +70,12 @@ class FederatedMetricsLogger:
             writer = csv.writer(f)
             header = ["round", "elapsed_seconds"] + list(self._eval_cols)
             for c in range(num_clients):
-                header += [f"client_{c}_items", f"client_{c}_trained"]
+                header += [
+                    f"client_{c}_items",
+                    f"client_{c}_accepted",
+                    f"client_{c}_rejected",
+                    f"client_{c}_optimizer_steps",
+                ]
             writer.writerow(header)
 
     def log_round(
@@ -96,7 +101,12 @@ class FederatedMetricsLogger:
         else:
             row += [""] * len(self._eval_keys)
         for cr in client_results:
-            row += [cr["items_processed"], cr["items_trained"]]
+            row += [
+                cr.get("items_processed", 0),
+                cr.get("items_accepted", cr.get("items_trained", 0)),
+                cr.get("items_rejected", 0),
+                cr.get("optimizer_steps", 0),
+            ]
 
         with open(self.rounds_file, "a", newline="") as f:
             csv.writer(f).writerow(row)

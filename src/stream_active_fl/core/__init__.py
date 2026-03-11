@@ -34,11 +34,13 @@ from .datasets import (
     get_detection_transforms,
 )
 from .items import StreamItem
+from .partitioning import partition_frames
 
 __all__ = [
     "CATEGORY_ID_TO_NAME",
     "CATEGORY_NAME_TO_ID",
     "NUM_CLASSES",
+    "partition_frames",
     "DetectionAugmentation",
     "DetectionDataset",
     "DetectionStream",

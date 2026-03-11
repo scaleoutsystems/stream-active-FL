@@ -1,4 +1,4 @@
-"""Experiment tracking and reproducibility utilities."""
+"""Run metadata tracking: git info, environment info, run_info.json."""
 
 from __future__ import annotations
 
@@ -66,22 +66,6 @@ def get_environment_info() -> Dict[str, Any]:
     return env_info
 
 
-def create_run_dir(base_output_dir: Path) -> Path:
-    """
-    Create a timestamped run directory.
-
-    Args:
-        base_output_dir: Parent directory for experiment outputs.
-
-    Returns:
-        Path to the created run directory.
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = base_output_dir / timestamp
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
 def save_run_info(
     run_dir: Path,
     config: Any,
@@ -97,7 +81,7 @@ def save_run_info(
     repo_path: Optional[Path] = None,
 ) -> None:
     """
-    Save run metadata to JSON file.
+    Save run metadata to run_info.json.
 
     Args:
         run_dir: Directory to save run_info.json.
@@ -109,7 +93,6 @@ def save_run_info(
         best_metric: Best metric value achieved.
         best_metric_name: Name of the metric (used when metric_key is None).
         metric_key: Override key for the metric. If None, uses "best_{best_metric_name}".
-            Use e.g. "final_val_mAP" when storing a final (not best) value.
         dataset_info: Optional dataset statistics.
         extra_info: Optional additional info to include.
         repo_path: Path to git repository for commit info.

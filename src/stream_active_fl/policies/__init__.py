@@ -37,6 +37,7 @@ def create_filter_policy(
     config: Any,
     bootstrap_mean: Optional[torch.Tensor] = None,
     bootstrap_cov: Optional[torch.Tensor] = None,
+    bootstrap_count: int = 0,
 ) -> FilterPolicy:
     """
     Create a filter policy from an experiment config dataclass.
@@ -48,6 +49,8 @@ def create_filter_policy(
             for distribution-based policy).
         bootstrap_cov: Covariance matrix from bootstrap phase (optional,
             used by distribution-based policy in mahalanobis mode).
+        bootstrap_count: Number of bootstrap samples used to compute
+            bootstrap_mean/bootstrap_cov.
 
     Returns:
         Configured FilterPolicy instance.
@@ -67,6 +70,7 @@ def create_filter_policy(
         return DistributionBasedPolicy(
             bootstrap_mean=bootstrap_mean,
             bootstrap_cov=bootstrap_cov,
+            bootstrap_count=bootstrap_count,
             mode=getattr(config, "distribution_mode", "mahalanobis"),
             accept_fraction=config.accept_fraction,
             score_window_size=getattr(config, "score_window_size", 500),

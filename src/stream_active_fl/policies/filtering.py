@@ -139,6 +139,10 @@ class FilterPolicy(ABC):
     def reset_selection_stats(self) -> None:
         self.selection_tracker.reset_interval()
 
+    def requires_model_forward(self) -> bool:
+        """Whether this policy needs model inference/gradients per item."""
+        return True
+
 
 # =============================================================================
 # NoFilterPolicy
@@ -164,6 +168,9 @@ class NoFilterPolicy(FilterPolicy):
 
     def get_stats(self) -> Dict[str, Any]:
         return {"count_accept": self.count, "accept_rate": 1.0}
+
+    def requires_model_forward(self) -> bool:
+        return False
 
 
 # =============================================================================
@@ -214,6 +221,9 @@ class RandomPolicy(FilterPolicy):
             "accept_fraction": self.accept_fraction,
         }
 
+    def requires_model_forward(self) -> bool:
+        return False
+
 
 # =============================================================================
 # DistributionBasedPolicy
@@ -225,7 +235,7 @@ class DistributionBasedPolicy(FilterPolicy):
     Embedding-distribution-based selective training policy.
 
     Maintains a running estimate of the embedding distribution seen so far
-    (initialized from bootstrap statistics).  For each new frame, extracts
+    (initialized from bootstrap statistics). For each new frame, extracts
     its backbone embedding and computes a distance score.  Frames on the
     "tail" of the distribution (high distance) are accepted as novel;
     frames near the center are rejected as redundant.
@@ -240,7 +250,10 @@ class DistributionBasedPolicy(FilterPolicy):
     Args:
         bootstrap_mean: Mean embedding vector from bootstrap (1D tensor).
         bootstrap_cov: Covariance matrix from bootstrap (2D tensor).
-            Only required for mode="mahalanobis".
+            Required for mode="mahalanobis".
+        bootstrap_count: Number of samples used to compute bootstrap_mean/cov.
+            Used as prior weight when update_stats=True. If unknown (<=0),
+            running-stat updates are disabled to avoid biased mean updates.
         mode: Distance computation mode.
         accept_fraction: Fraction of items to accept (top percentile by
             distance). E.g. 0.3 means accept the ~30% most distant items.
@@ -250,13 +263,15 @@ class DistributionBasedPolicy(FilterPolicy):
         embedding_buffer_size: For mode="knn", how many recent embeddings
             to store.
         knn_k: For mode="knn", number of nearest neighbors.
-        update_stats: Whether to update running mean/cov with accepted embeddings.
+        update_stats: Whether to update running mean with accepted embeddings.
+            Covariance is kept fixed to bootstrap_cov for mahalanobis mode.
     """
 
     def __init__(
         self,
         bootstrap_mean: torch.Tensor,
         bootstrap_cov: Optional[torch.Tensor] = None,
+        bootstrap_count: int = 0,
         mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis",
         accept_fraction: float = 0.3,
         score_window_size: int = 500,
@@ -266,11 +281,12 @@ class DistributionBasedPolicy(FilterPolicy):
         update_stats: bool = True,
     ):
         super().__init__()
+        if mode == "mahalanobis" and bootstrap_cov is None:
+            raise ValueError("mahalanobis mode requires bootstrap_cov")
         self.mode = mode
         self.accept_fraction = accept_fraction
         self.score_window_size = score_window_size
         self.warmup_items = warmup_items
-        self.update_stats = update_stats
         self.knn_k = knn_k
 
         # Running statistics
@@ -293,8 +309,10 @@ class DistributionBasedPolicy(FilterPolicy):
         self.count_accept = 0
         self.count_reject = 0
 
-        # Running mean update state
-        self._n_embeddings = 0
+        # Running-mean update state (prior from bootstrap stats).
+        self.bootstrap_count = int(max(bootstrap_count, 0))
+        self.update_stats = bool(update_stats and self.bootstrap_count > 0)
+        self._n_embeddings = self.bootstrap_count
 
     def _compute_score(self, embedding: torch.Tensor) -> float:
         """Compute a distance score for a single embedding (1D tensor)."""
@@ -385,6 +403,8 @@ class DistributionBasedPolicy(FilterPolicy):
             "items_seen": self.items_seen,
             "mode": self.mode,
             "accept_fraction": self.accept_fraction,
+            "bootstrap_count": self.bootstrap_count,
+            "update_stats_enabled": self.update_stats,
             "current_threshold": self._get_threshold(),
         }
 

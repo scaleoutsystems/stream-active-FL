@@ -12,9 +12,9 @@ on the CLI) to skip Phase 1 and load the model + embeddings from a previous
 run.  This saves hours when comparing filter policies.
 
 Usage:
-    python experiments/streaming_detection.py --config configs/detection/no_filter.yaml
-    python experiments/streaming_detection.py --config configs/detection/distribution_filter.yaml \
-        --bootstrap-run-dir outputs/no_filter/2026-03-02_09-32-13
+    python experiments/streaming_detection.py --config configs/streaming_no_filter.yaml
+    python experiments/streaming_detection.py --config configs/streaming_distribution_filter.yaml \
+        --bootstrap-run-dir outputs/streaming/no_filter/2026-03-02_09-32-13
 """
 
 from __future__ import annotations
@@ -44,9 +44,14 @@ from stream_active_fl.core import (
     get_detection_transforms,
 )
 from stream_active_fl.evaluation import NoveltyTracker, evaluate_detection
-from stream_active_fl.logging import StreamingMetricsLogger, create_run_dir, save_run_info
+from stream_active_fl.experiment import (
+    build_detector_from_config,
+    load_dataclass_config,
+    resolve_manifest_path,
+    setup_run_dir,
+)
+from stream_active_fl.logging import StreamingMetricsLogger, save_run_info
 from stream_active_fl.memory import TrainingBuffer
-from stream_active_fl.models import Detector
 from stream_active_fl.policies import create_filter_policy
 from stream_active_fl.training import bootstrap_train, collect_embeddings, train_on_stream
 from stream_active_fl.utils import set_seed
@@ -63,7 +68,7 @@ class StreamingDetectionConfig:
 
     # Paths
     manifest_path: str = ""
-    output_dir: str = "outputs/streaming_detection"
+    output_dir: str = "outputs/streaming/no_filter"
 
     # Model
     num_classes: int = 11
@@ -128,9 +133,7 @@ class StreamingDetectionConfig:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "StreamingDetectionConfig":
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        return load_dataclass_config(cls, path)
 
 
 # =============================================================================
@@ -149,15 +152,9 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    manifest_path = Path(config.manifest_path)
-    if not manifest_path.is_absolute():
-        manifest_path = PROJECT_ROOT / manifest_path
-
-    base_output_dir = PROJECT_ROOT / config.output_dir
-    run_dir = create_run_dir(base_output_dir)
+    manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
+    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
-
-    shutil.copy(config_path, run_dir / "config.yaml")
 
     # Transforms + augmentation
     train_transform, val_transform = get_detection_transforms()
@@ -172,6 +169,11 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     # Phase 1: Bootstrap (run or reuse)
     # =========================================================================
 
+    requires_bootstrap_embeddings = (config.filter_policy == "distribution")
+    embedding_mean: Optional[torch.Tensor] = None
+    embedding_cov: Optional[torch.Tensor] = None
+    embedding_count: int = 0
+
     # Resolve bootstrap_run_dir (config or CLI override)
     bootstrap_source: Optional[Path] = None
     if config.bootstrap_run_dir:
@@ -181,11 +183,13 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     if bootstrap_source is not None:
         # ----- Reuse bootstrap from a previous run -----
         model_path = bootstrap_source / "bootstrap_model.pt"
-        embed_path = bootstrap_source / "bootstrap_embeddings.pt"
         if not model_path.exists():
             raise FileNotFoundError(f"Bootstrap model not found: {model_path}")
-        if not embed_path.exists():
-            raise FileNotFoundError(f"Bootstrap embeddings not found: {embed_path}")
+        embed_path = bootstrap_source / "bootstrap_embeddings.pt"
+        if requires_bootstrap_embeddings and not embed_path.exists():
+            raise FileNotFoundError(
+                f"Bootstrap embeddings required for distribution policy, not found: {embed_path}"
+            )
 
         print("\n" + "=" * 60)
         print("Phase 1: Loading Bootstrap from Previous Run")
@@ -204,28 +208,32 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                 if src_val is not None and cur_val is not None and src_val != cur_val:
                     print(f"  WARNING: {key} differs: source={src_val}, current={cur_val}")
 
-        model = Detector(
-            num_classes=config.num_classes,
-            trainable_backbone_layers=config.trainable_backbone_layers,
-            image_min_size=config.image_min_size,
-            image_max_size=config.image_max_size,
-            pretrained_backbone=config.pretrained_backbone,
-            pretrained_detector=config.pretrained_detector,
-        )
+        model = build_detector_from_config(config)
         ckpt = torch.load(model_path, map_location="cpu")
         model.load_state_dict(ckpt["model_state_dict"])
         model = model.to(device)
         print(model)
         print(f"Loaded bootstrap model from {model_path.name}")
 
-        embed_data = torch.load(embed_path, map_location="cpu")
-        embedding_mean = embed_data["mean"]
-        embedding_cov = embed_data["cov"]
-        print(f"Loaded embeddings: mean {embedding_mean.shape}, cov {embedding_cov.shape}")
+        if requires_bootstrap_embeddings:
+            embed_data = torch.load(embed_path, map_location="cpu")
+            embedding_mean = embed_data["mean"]
+            embedding_cov = embed_data["cov"]
+            if "count" not in embed_data:
+                raise KeyError(
+                    "bootstrap_embeddings.pt is missing required key 'count'. "
+                    "Please regenerate bootstrap embeddings with the current code."
+                )
+            embedding_count = int(embed_data["count"])
+            print(
+                "Loaded embeddings:"
+                f" mean {embedding_mean.shape}, cov {embedding_cov.shape}, n={embedding_count}"
+            )
 
         # Copy artifacts into this run for provenance
         shutil.copy(model_path, run_dir / "bootstrap_model.pt")
-        shutil.copy(embed_path, run_dir / "bootstrap_embeddings.pt")
+        if requires_bootstrap_embeddings:
+            shutil.copy(embed_path, run_dir / "bootstrap_embeddings.pt")
         (run_dir / "bootstrap_source.txt").write_text(str(bootstrap_source))
 
     else:
@@ -251,14 +259,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             collate_fn=detection_collate,
         )
 
-        model = Detector(
-            num_classes=config.num_classes,
-            trainable_backbone_layers=config.trainable_backbone_layers,
-            image_min_size=config.image_min_size,
-            image_max_size=config.image_max_size,
-            pretrained_backbone=config.pretrained_backbone,
-            pretrained_detector=config.pretrained_detector,
-        )
+        model = build_detector_from_config(config)
 
         if config.load_checkpoint:
             checkpoint_path = PROJECT_ROOT / config.load_checkpoint
@@ -326,24 +327,26 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             run_dir / "bootstrap_model.pt",
         )
 
-        # Collect embedding statistics
-        print("\nCollecting embedding statistics...")
-        embed_loader = torch.utils.data.DataLoader(
-            bootstrap_dataset,
-            batch_size=config.bootstrap_batch_size,
-            shuffle=False,
-            num_workers=2,
-            collate_fn=detection_collate,
-        )
-        embedding_mean, embedding_cov = collect_embeddings(model, embed_loader, device)
-        print(f"Embedding mean shape: {embedding_mean.shape}")
-        print(f"Embedding cov shape:  {embedding_cov.shape}")
+        if requires_bootstrap_embeddings:
+            # Collect embedding statistics (distribution policy only)
+            print("\nCollecting embedding statistics...")
+            embed_loader = torch.utils.data.DataLoader(
+                bootstrap_dataset,
+                batch_size=config.bootstrap_batch_size,
+                shuffle=False,
+                num_workers=2,
+                collate_fn=detection_collate,
+            )
+            embedding_mean, embedding_cov, embedding_count = collect_embeddings(model, embed_loader, device)
+            print(f"Embedding mean shape: {embedding_mean.shape}")
+            print(f"Embedding cov shape:  {embedding_cov.shape}")
+            print(f"Embedding count:      {embedding_count}")
 
-        # Save embeddings
-        torch.save(
-            {"mean": embedding_mean, "cov": embedding_cov},
-            run_dir / "bootstrap_embeddings.pt",
-        )
+            # Save embeddings
+            torch.save(
+                {"mean": embedding_mean, "cov": embedding_cov, "count": embedding_count},
+                run_dir / "bootstrap_embeddings.pt",
+            )
 
     # =========================================================================
     # Phase 2: Streaming
@@ -382,6 +385,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         config,
         bootstrap_mean=embedding_mean,
         bootstrap_cov=embedding_cov,
+        bootstrap_count=embedding_count,
     )
     print(f"Filter policy: {config.filter_policy}")
 

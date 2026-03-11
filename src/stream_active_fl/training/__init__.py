@@ -1,9 +1,9 @@
 """
-Training loops for the two-phase streaming detection pipeline.
+Training loops and aggregation strategies.
 
 - Bootstrap: multi-epoch supervised training on initial frames
 - Streaming: single-pass buffer-based training with filtering
-- Federated: FedAvg aggregation (kept for future use)
+- Federated: FedAvg aggregation across client models
 """
 
 from .federated import fedavg

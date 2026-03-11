@@ -6,14 +6,13 @@ Trains a detection model on all training frames for multiple epochs using a
 standard DataLoader with shuffle, then evaluates on the validation set.
 
 Usage:
-    python experiments/offline_baseline.py --config configs/detection/offline_baseline.yaml
+    python experiments/offline_baseline.py --config configs/offline_baseline.yaml
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import shutil
 import sys
 import warnings
 from dataclasses import dataclass
@@ -22,13 +21,13 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import torch
-import yaml
 
 warnings.filterwarnings("ignore", message="Can't initialize NVML")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from stream_active_fl.core import (
+    CATEGORY_ID_TO_NAME,
     DetectionDataset,
     DetectionStream,
     detection_collate,
@@ -36,8 +35,13 @@ from stream_active_fl.core import (
     get_detection_transforms,
 )
 from stream_active_fl.evaluation import evaluate_detection
-from stream_active_fl.logging import create_run_dir, save_run_info
-from stream_active_fl.models import Detector
+from stream_active_fl.experiment import (
+    build_detector_from_config,
+    load_dataclass_config,
+    resolve_manifest_path,
+    setup_run_dir,
+)
+from stream_active_fl.logging import save_run_info
 from stream_active_fl.training import bootstrap_train
 from stream_active_fl.utils import set_seed
 
@@ -53,7 +57,7 @@ class OfflineBaselineConfig:
 
     # Paths
     manifest_path: str = ""
-    output_dir: str = "outputs/offline_baseline"
+    output_dir: str = "outputs/offline/baseline"
 
     # Model
     num_classes: int = 11
@@ -94,9 +98,7 @@ class OfflineBaselineConfig:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "OfflineBaselineConfig":
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        return load_dataclass_config(cls, path)
 
 
 # =============================================================================
@@ -110,26 +112,37 @@ class EpochLogger:
     def __init__(self, log_dir: Path):
         self.log_dir = log_dir
         self.csv_path = log_dir / "epochs.csv"
-        self._header_written = False
+        per_class_cols = [f"AP_{name}" for name in CATEGORY_ID_TO_NAME.values()]
+        self.fieldnames = [
+            "epoch",
+            "train_loss",
+            "lr",
+            "mAP",
+            "mAP_50",
+            "mAP_75",
+            "num_items",
+            "total_predictions",
+            "total_ground_truth",
+            *per_class_cols,
+        ]
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writeheader()
 
     def log(self, epoch: int, train_loss: float, eval_metrics: Optional[dict] = None, lr: Optional[float] = None) -> None:
-        row = {"epoch": epoch, "train_loss": f"{train_loss:.6f}"}
+        row = {k: "" for k in self.fieldnames}
+        row["epoch"] = str(epoch)
+        row["train_loss"] = f"{train_loss:.6f}"
         if lr is not None:
             row["lr"] = f"{lr:.2e}"
         if eval_metrics:
             for k, v in eval_metrics.items():
-                row[k] = f"{v:.4f}" if isinstance(v, float) else str(v)
+                if k in row:
+                    row[k] = f"{v:.4f}" if isinstance(v, float) else str(v)
 
-        if not self._header_written:
-            with open(self.csv_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-                writer.writeheader()
-                writer.writerow(row)
-            self._header_written = True
-        else:
-            with open(self.csv_path, "a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-                writer.writerow(row)
+        with open(self.csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writerow(row)
 
 
 # =============================================================================
@@ -148,15 +161,9 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    manifest_path = Path(config.manifest_path)
-    if not manifest_path.is_absolute():
-        manifest_path = PROJECT_ROOT / manifest_path
-
-    base_output_dir = PROJECT_ROOT / config.output_dir
-    run_dir = create_run_dir(base_output_dir)
+    manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
+    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
-
-    shutil.copy(config_path, run_dir / "config.yaml")
 
     # Transforms + augmentation
     train_transform, val_transform = get_detection_transforms()
@@ -192,14 +199,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     )
 
     # Model
-    model = Detector(
-        num_classes=config.num_classes,
-        trainable_backbone_layers=config.trainable_backbone_layers,
-        image_min_size=config.image_min_size,
-        image_max_size=config.image_max_size,
-        pretrained_backbone=config.pretrained_backbone,
-        pretrained_detector=config.pretrained_detector,
-    )
+    model = build_detector_from_config(config)
 
     if config.load_checkpoint:
         checkpoint_path = PROJECT_ROOT / config.load_checkpoint
