@@ -33,6 +33,10 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 buffer_capacity: 16
 train_steps_per_buffer: 1
+buffer_training_mode: "full_batch"  # "full_batch" or "mini_batch"
+local_epochs_per_buffer: 1
+mini_batch_size: 8
+shuffle_buffer_each_epoch: true
 
 # Augmentation
 augment: true

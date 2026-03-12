@@ -88,6 +88,10 @@ class FederatedDetectionConfig:
     max_grad_norm: float = 1.0
     buffer_capacity: int = 16
     train_steps_per_buffer: int = 1
+    buffer_training_mode: Literal["full_batch", "mini_batch"] = "full_batch"
+    local_epochs_per_buffer: int = 1
+    mini_batch_size: int = 8
+    shuffle_buffer_each_epoch: bool = True
 
     # Augmentation
     augment: bool = True
@@ -425,6 +429,10 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 device=device,
                 max_grad_norm=config.max_grad_norm,
                 train_steps_per_buffer=config.train_steps_per_buffer,
+                buffer_training_mode=config.buffer_training_mode,
+                local_epochs_per_buffer=config.local_epochs_per_buffer,
+                mini_batch_size=config.mini_batch_size,
+                shuffle_buffer_each_epoch=config.shuffle_buffer_each_epoch,
                 metrics_logger=None,
                 eval_fn=None,
                 novelty_tracker=None,

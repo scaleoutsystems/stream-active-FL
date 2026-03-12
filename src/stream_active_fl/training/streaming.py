@@ -12,7 +12,7 @@ Phase 2 -- Streaming:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -180,6 +180,10 @@ def train_on_stream(
     *,
     max_grad_norm: float = 0.0,
     train_steps_per_buffer: int = 1,
+    buffer_training_mode: Literal["full_batch", "mini_batch"] = "full_batch",
+    local_epochs_per_buffer: int = 1,
+    mini_batch_size: int = 8,
+    shuffle_buffer_each_epoch: bool = True,
     metrics_logger: Optional[StreamingMetricsLogger] = None,
     eval_fn: Optional[Callable[[nn.Module], Dict[str, Any]]] = None,
     eval_every_n_checkpoints: int = 1,
@@ -191,9 +195,9 @@ def train_on_stream(
     Single-pass buffer-based streaming training.
 
     Processes stream items one at a time. For each item the filter policy
-    decides accept or reject.  Accepted items go into the TrainingBuffer.
-    When the buffer is full, one (or a few) optimizer steps are performed
-    on the full buffer, then the buffer is cleared and streaming continues.
+    decides accept or reject. Accepted items go into the TrainingBuffer.
+    When the buffer is full, local training is performed and then the
+    buffer is cleared before streaming continues.
 
     Args:
         model: The detection model.
@@ -203,8 +207,16 @@ def train_on_stream(
         training_buffer: Buffer that accumulates accepted items.
         device: Training device.
         max_grad_norm: Gradient clipping norm (0 = disabled).
-        train_steps_per_buffer: How many optimizer steps to run when the
-            buffer is full. Usually 1.
+        train_steps_per_buffer: Number of repeated full-batch optimizer
+            steps when buffer_training_mode="full_batch".
+        buffer_training_mode:
+            - "full_batch": current behavior, repeat steps on entire buffer.
+            - "mini_batch": run local epochs over mini-batches from buffer.
+        local_epochs_per_buffer: Number of local epochs when
+            buffer_training_mode="mini_batch".
+        mini_batch_size: Mini-batch size when buffer_training_mode="mini_batch".
+        shuffle_buffer_each_epoch: Reshuffle buffer items each local epoch
+            in mini-batch mode.
         metrics_logger: Optional logger for streaming metrics.
         eval_fn: Optional evaluation callback (model) -> metrics_dict.
         eval_every_n_checkpoints: Evaluate every N checkpoints.
@@ -217,6 +229,12 @@ def train_on_stream(
     """
     if total_items is None and hasattr(stream, "__len__"):
         total_items = len(stream)
+    if train_steps_per_buffer < 1:
+        raise ValueError("train_steps_per_buffer must be >= 1")
+    if local_epochs_per_buffer < 1:
+        raise ValueError("local_epochs_per_buffer must be >= 1")
+    if mini_batch_size < 1:
+        raise ValueError("mini_batch_size must be >= 1")
 
     items_processed = 0
     items_accepted = 0
@@ -224,27 +242,44 @@ def train_on_stream(
     optimizer_steps = 0
     checkpoint_idx = 0
 
-    def _train_on_current_buffer() -> None:
+    def _optimizer_step(
+        images: List[torch.Tensor],
+        targets: List[Dict[str, torch.Tensor]],
+    ) -> None:
         nonlocal optimizer_steps
-        model.train()
-        images, targets = training_buffer.get_batch()
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        model.train()
 
-        for _ in range(train_steps_per_buffer):
-            optimizer.zero_grad()
-            loss_dict = model(images, targets)
-            loss = sum(loss_dict.values())
-            loss.backward()
+        optimizer.zero_grad()
+        loss_dict = model(images, targets)
+        loss = sum(loss_dict.values())
+        loss.backward()
 
-            if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad],
-                    max_grad_norm,
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                max_grad_norm,
+            )
+
+        optimizer.step()
+        optimizer_steps += 1
+
+    def _train_on_current_buffer() -> None:
+        if buffer_training_mode == "full_batch":
+            images, targets = training_buffer.get_batch()
+            for _ in range(train_steps_per_buffer):
+                _optimizer_step(images, targets)
+        elif buffer_training_mode == "mini_batch":
+            for _ in range(local_epochs_per_buffer):
+                mini_batches = training_buffer.get_minibatches(
+                    mini_batch_size,
+                    shuffle=shuffle_buffer_each_epoch,
                 )
-
-            optimizer.step()
-            optimizer_steps += 1
+                for images, targets in mini_batches:
+                    _optimizer_step(images, targets)
+        else:
+            raise ValueError(f"Unknown buffer_training_mode: {buffer_training_mode}")
 
         training_buffer.clear()
 

@@ -9,7 +9,8 @@ accumulation and batch retrieval.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+import random
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -61,13 +62,50 @@ class TrainingBuffer:
             - images: List of tensors, each (3, H, W)
             - targets: List of dicts, each with "boxes" and "labels"
         """
-        images = [item.image for item in self._items]
+        return self._collate_items(self._items)
+
+    def get_minibatches(
+        self,
+        mini_batch_size: int,
+        *,
+        shuffle: bool = False,
+    ) -> List[Tuple[List[torch.Tensor], List[Dict[str, torch.Tensor]]]]:
+        """
+        Split current buffer content into mini-batches.
+
+        Args:
+            mini_batch_size: Number of items per mini-batch (> 0).
+            shuffle: If True, randomize item order before splitting.
+
+        Returns:
+            List of mini-batches, each in the same format as get_batch().
+        """
+        if mini_batch_size <= 0:
+            raise ValueError("mini_batch_size must be > 0")
+        if len(self._items) == 0:
+            return []
+
+        items = list(self._items)
+        if shuffle:
+            random.shuffle(items)
+
+        batches: List[Tuple[List[torch.Tensor], List[Dict[str, torch.Tensor]]]] = []
+        for start in range(0, len(items), mini_batch_size):
+            batch_items = items[start : start + mini_batch_size]
+            batches.append(self._collate_items(batch_items))
+        return batches
+
+    @staticmethod
+    def _collate_items(
+        items: List[StreamItem],
+    ) -> Tuple[List[torch.Tensor], List[Dict[str, torch.Tensor]]]:
+        images = [item.image for item in items]
         targets = [
             {
                 "boxes": item.annotations["boxes"],
                 "labels": item.annotations["labels"],
             }
-            for item in self._items
+            for item in items
         ]
         return images, targets
 
