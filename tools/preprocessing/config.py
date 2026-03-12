@@ -27,24 +27,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # =============================================================================
 
 # Original ZOD image size: 3848 x 2168
-# Crop: bottom-only (remove ego hood) + side trim (remove fisheye distortion)
-# Result: 2840 x 1600, aspect ratio ~16:9 (1.775:1)
+# Wide crop: trim 4 px on each side and crop vertically to 1152 px.
+# Result: 3840 x 1152 (10:3 aspect ratio).
 CROP_PARAMS = {
-    "top": 0,
-    "left": 504,
-    "height": 1600,
-    "width": 2840,
+    "top": 428,
+    "left": 4,
+    "height": 1152,
+    "width": 3840,
 }
 
-CROP_WIDTH = CROP_PARAMS["width"]    # 2840
-CROP_HEIGHT = CROP_PARAMS["height"]  # 1600
+CROP_WIDTH = CROP_PARAMS["width"]    # 3840
+CROP_HEIGHT = CROP_PARAMS["height"]  # 1152
 
 # =============================================================================
 # Resize parameters
 # =============================================================================
 
-RESIZE_WIDTH = 1280
-RESIZE_HEIGHT = 720
+RESIZE_WIDTH = 1600
+RESIZE_HEIGHT = 480
 
 RESIZE_TARGET = (RESIZE_WIDTH, RESIZE_HEIGHT)  # (width, height) for PIL
 

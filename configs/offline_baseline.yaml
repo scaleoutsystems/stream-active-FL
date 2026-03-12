@@ -1,14 +1,14 @@
 # Offline baseline: multi-epoch shuffled training on all frames (performance ceiling)
 
 # Paths
-manifest_path: "data/Frames_1280x720/manifest.json"
+manifest_path: "data/Frames_1600x480/manifest.json"
 output_dir: "outputs/offline/baseline"
 
 # Model
 num_classes: 11
 trainable_backbone_layers: 3
-image_min_size: 720
-image_max_size: 1280
+image_min_size: 480
+image_max_size: 1600
 pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
