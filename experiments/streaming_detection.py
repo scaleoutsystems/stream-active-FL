@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import sys
 import warnings
@@ -281,7 +282,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         )
 
         print(f"\nBootstrap: {config.bootstrap_frames} frames, {config.bootstrap_epochs} epochs")
-        final_loss, total_steps = bootstrap_train(
+        epoch_logs, total_steps = bootstrap_train(
             model=model,
             train_loader=bootstrap_loader,
             optimizer=bootstrap_optimizer,
@@ -289,7 +290,13 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             epochs=config.bootstrap_epochs,
             max_grad_norm=config.max_grad_norm,
         )
+        final_loss = epoch_logs[-1]["avg_loss"] if epoch_logs else float("nan")
         print(f"Bootstrap complete: final_loss={final_loss:.4f}, steps={total_steps}")
+
+        with open(run_dir / "bootstrap_epochs.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["epoch", "avg_loss", "batches"])
+            writer.writeheader()
+            writer.writerows(epoch_logs)
 
         print("\nRunning bootstrap smoke-check...")
         smoke_val_stream = DetectionStream(

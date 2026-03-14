@@ -54,29 +54,20 @@ def bootstrap_train(
     epochs: int = 10,
     max_grad_norm: float = 0.0,
     progress_bar: bool = True,
-) -> Tuple[float, int]:
+) -> Tuple[List[Dict[str, float]], int]:
     """
     Multi-epoch training on bootstrap frames (standard supervised detection).
 
     This is the only place where multi-epoch training is allowed. Uses a
     standard DataLoader with shuffle.
 
-    Args:
-        model: The detection model.
-        train_loader: DataLoader over DetectionDataset (bootstrap subset).
-        optimizer: Optimizer for trainable parameters.
-        device: Training device.
-        epochs: Number of training epochs.
-        max_grad_norm: Gradient clipping norm (0 = disabled).
-        progress_bar: Show progress bar.
-
     Returns:
-        (final_epoch_loss, total_steps): Average loss from the last epoch
-        and total number of optimizer steps taken.
+        (epoch_logs, total_steps): Per-epoch metrics and total optimizer steps.
+        Each entry in epoch_logs is {"epoch": int, "avg_loss": float, "batches": int}.
     """
     model.train()
     total_steps = 0
-    epoch_loss = 0.0
+    epoch_logs: List[Dict[str, float]] = []
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -114,10 +105,11 @@ def bootstrap_train(
             if progress_bar and hasattr(loader, "set_postfix"):
                 loader.set_postfix(loss=f"{loss.item():.4f}")
 
-        epoch_loss = running_loss / max(n_batches, 1)
-        print(f"  Epoch {epoch + 1}/{epochs} — avg loss: {epoch_loss:.4f}")
+        avg_loss = running_loss / max(n_batches, 1)
+        epoch_logs.append({"epoch": epoch + 1, "avg_loss": avg_loss, "batches": n_batches})
+        print(f"  Epoch {epoch + 1}/{epochs} — avg loss: {avg_loss:.4f}")
 
-    return epoch_loss, total_steps
+    return epoch_logs, total_steps
 
 
 @torch.no_grad()

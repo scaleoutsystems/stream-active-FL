@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -32,13 +33,10 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
-    ANNOTATIONS_DIR,
     CATEGORY_NAME_TO_ID,
     CROP_HEIGHT,
     CROP_PARAMS,
     CROP_WIDTH,
-    IMAGES_DIR,
-    MANIFEST_PATH,
     MIN_BOX_AREA,
     ORIGINAL_ZOD_ROOT,
     OUTPUT_DIR,
@@ -144,16 +142,11 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     with ann_path.open("w") as f:
         json.dump(ann_data, f, indent=2)
 
-    # Try to extract timestamp from metadata
     timestamp = None
-    try:
-        metadata = zod_frame.metadata
-        if hasattr(metadata, "timestamp"):
-            timestamp = metadata.timestamp
-        elif hasattr(metadata, "collection_time"):
-            timestamp = metadata.collection_time
-    except Exception:
-        pass
+    meta = zod_frame.metadata
+    if hasattr(meta, "time") and meta.time is not None:
+        ts = meta.time
+        timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
 
     return {
         "frame_id": frame_id,
@@ -165,7 +158,7 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     }
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Preprocess ZOD Frames")
     parser.add_argument("--zod-root", type=str, default=str(ORIGINAL_ZOD_ROOT))
     parser.add_argument("--version", type=str, default="full", choices=["full", "mini"])
@@ -230,8 +223,6 @@ def main():
     print(f"\nDone! Processed {len(manifest_entries)} frames ({failed} failed)")
     print(f"Manifest: {manifest_path}")
 
-    # Print category statistics
-    from collections import Counter
     cat_counts: Counter = Counter()
     for entry in manifest_entries:
         for cat in entry["categories_present"]:

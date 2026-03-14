@@ -244,7 +244,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             for pg in optimizer.param_groups:
                 pg["lr"] = config.lr * warmup_factor
 
-        epoch_loss, _ = bootstrap_train(
+        epoch_logs, _ = bootstrap_train(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
@@ -253,6 +253,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             max_grad_norm=config.max_grad_norm,
             progress_bar=True,
         )
+        epoch_loss = epoch_logs[0]["avg_loss"] if epoch_logs else float("nan")
 
         # Step scheduler after warmup
         if scheduler is not None and epoch > config.lr_warmup_epochs:
