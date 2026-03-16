@@ -11,11 +11,11 @@ import csv
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from ..core import CATEGORY_ID_TO_NAME
 
-_PER_CLASS_AP_COLS: List[str] = [f"AP_{name}" for name in CATEGORY_ID_TO_NAME.values()]
+_DEFAULT_CLASS_NAMES: List[str] = list(CATEGORY_ID_TO_NAME.values())
 _CHECKPOINT_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
 
 
@@ -39,17 +39,22 @@ class StreamingMetricsLogger:
     Args:
         log_dir: Directory to save CSV logs.
         checkpoint_interval: How often to log checkpoints (in stream items).
+        class_names: Class names for per-class AP columns. Defaults to all
+            ZOD classes. Pass ClassMapping.names when using a class subset.
     """
 
     def __init__(
         self,
         log_dir: str | Path,
         checkpoint_interval: int = 1000,
+        class_names: Optional[Sequence[str]] = None,
     ):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self.checkpoint_interval = checkpoint_interval
+        self._class_names = list(class_names) if class_names is not None else _DEFAULT_CLASS_NAMES
+        self._per_class_ap_cols = [f"AP_{name}" for name in self._class_names]
 
         self.metrics_file = self.log_dir / "streaming_metrics.csv"
         self.checkpoints_file = self.log_dir / "checkpoints.csv"
@@ -97,7 +102,7 @@ class StreamingMetricsLogger:
                 "mAP_50",
                 "mAP_75",
                 "elapsed_seconds",
-            ] + _CHECKPOINT_COUNT_COLS + _PER_CLASS_AP_COLS)
+            ] + _CHECKPOINT_COUNT_COLS + self._per_class_ap_cols)
 
         with open(self.filter_stats_file, "w", newline="") as f:
             csv.writer(f).writerow([
@@ -254,7 +259,7 @@ class StreamingMetricsLogger:
         ]
         for key in _CHECKPOINT_COUNT_COLS:
             row.append(f"{eval_metrics.get(key, 0.0):.4f}")
-        for key in _PER_CLASS_AP_COLS:
+        for key in self._per_class_ap_cols:
             row.append(f"{eval_metrics.get(key, 0.0):.4f}")
 
         with open(self.checkpoints_file, "a", newline="") as f:

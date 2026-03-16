@@ -1,11 +1,12 @@
 # Streaming detection: no filtering baseline (accept all)
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest.json"
+manifest_path: "data/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/no_filter"
 
-# Model
+# Model / classes
 num_classes: 11
+target_classes: null  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -15,7 +16,7 @@ load_checkpoint: null
 
 # Bootstrap phase (set bootstrap_run_dir to reuse a previous bootstrap)
 bootstrap_run_dir: null
-bootstrap_frames: 5000
+bootstrap_frames: 2000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
@@ -26,8 +27,8 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 buffer_capacity: 16
 train_steps_per_buffer: 1
-buffer_training_mode: "full_batch"  # "full_batch" or "mini_batch"
-local_epochs_per_buffer: 1
+buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
+local_epochs_per_buffer: 3
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 

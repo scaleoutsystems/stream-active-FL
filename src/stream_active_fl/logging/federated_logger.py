@@ -14,26 +14,13 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from ..core import CATEGORY_ID_TO_NAME
 
 _CLASSIFICATION_EVAL_COLS: List[str] = ["loss", "accuracy", "precision", "recall", "f1"]
-_CLASSIFICATION_EVAL_KEYS: List[str] = ["loss", "accuracy", "precision", "recall", "f1"]
 _DETECTION_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
-_DETECTION_PER_CLASS_AP_COLS: List[str] = [
-    f"AP_{name}" for name in CATEGORY_ID_TO_NAME.values()
-]
-_DETECTION_EVAL_COLS: List[str] = (
-    ["mAP", "mAP_50", "mAP_75"]
-    + _DETECTION_COUNT_COLS
-    + _DETECTION_PER_CLASS_AP_COLS
-)
-_DETECTION_EVAL_KEYS: List[str] = (
-    ["mAP", "mAP_50", "mAP_75"]
-    + _DETECTION_COUNT_COLS
-    + _DETECTION_PER_CLASS_AP_COLS
-)
+_DEFAULT_CLASS_NAMES: List[str] = list(CATEGORY_ID_TO_NAME.values())
 
 
 class FederatedMetricsLogger:
@@ -45,8 +32,9 @@ class FederatedMetricsLogger:
     Args:
         log_dir: Directory to write rounds.csv into.
         num_clients: Number of clients (determines per-client columns).
-        task: "classification" or "detection".  Controls which evaluation
-            metric columns are used.
+        task: "classification" or "detection".
+        class_names: Class names for per-class AP columns (detection only).
+            Defaults to all ZOD classes.
     """
 
     def __init__(
@@ -54,16 +42,18 @@ class FederatedMetricsLogger:
         log_dir: str | Path,
         num_clients: int,
         task: str = "classification",
+        class_names: Optional[Sequence[str]] = None,
     ):
         self.log_dir = Path(log_dir)
         self.task = task
 
+        names = list(class_names) if class_names is not None else _DEFAULT_CLASS_NAMES
+        per_class_cols = [f"AP_{name}" for name in names]
+
         if task == "detection":
-            self._eval_cols = _DETECTION_EVAL_COLS
-            self._eval_keys = _DETECTION_EVAL_KEYS
+            self._eval_cols = ["mAP", "mAP_50", "mAP_75"] + _DETECTION_COUNT_COLS + per_class_cols
         else:
             self._eval_cols = _CLASSIFICATION_EVAL_COLS
-            self._eval_keys = _CLASSIFICATION_EVAL_KEYS
 
         self.rounds_file = self.log_dir / "rounds.csv"
         with open(self.rounds_file, "w", newline="") as f:
@@ -85,21 +75,12 @@ class FederatedMetricsLogger:
         client_results: list[dict],
         elapsed: float,
     ) -> None:
-        """Append one row to rounds.csv.
-
-        Args:
-            round_idx: Current federated round number.
-            eval_metrics: Server evaluation dict, or None if evaluation
-                was skipped this round.
-            client_results: Per-client dicts with items_processed and
-                items_trained counts.
-            elapsed: Wall-clock seconds since training started.
-        """
+        """Append one row to rounds.csv."""
         row: list = [round_idx, f"{elapsed:.1f}"]
         if eval_metrics is not None:
-            row += [f"{eval_metrics.get(k, 0.0):.4f}" for k in self._eval_keys]
+            row += [f"{eval_metrics.get(k, 0.0):.4f}" for k in self._eval_cols]
         else:
-            row += [""] * len(self._eval_keys)
+            row += [""] * len(self._eval_cols)
         for cr in client_results:
             row += [
                 cr.get("items_processed", 0),

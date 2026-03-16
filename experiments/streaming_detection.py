@@ -27,7 +27,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 from stream_active_fl.core import (
     DetectionDataset,
     DetectionStream,
+    build_class_mapping,
     detection_collate,
     get_detection_augmentation,
     get_detection_transforms,
@@ -71,8 +72,9 @@ class StreamingDetectionConfig:
     manifest_path: str = ""
     output_dir: str = "outputs/streaming/no_filter"
 
-    # Model
+    # Model / classes
     num_classes: int = 11
+    target_classes: Optional[List[str]] = None
     trainable_backbone_layers: int = 0
     image_min_size: int = 480
     image_max_size: int = 1600
@@ -160,6 +162,11 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
     run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
+
+    class_mapping = build_class_mapping(config.target_classes)
+    if config.target_classes is not None:
+        config.num_classes = class_mapping.num_classes
+        print(f"Target classes ({len(class_mapping.names)}): {', '.join(class_mapping.names)}")
 
     # Transforms + augmentation
     train_transform, val_transform = get_detection_transforms()
@@ -254,6 +261,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             augmentation=train_augmentation,
             frame_range=(0, config.bootstrap_frames),
             min_box_area=config.min_box_area,
+            target_classes=config.target_classes,
         )
 
         bootstrap_loader = torch.utils.data.DataLoader(
@@ -305,6 +313,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             transform=val_transform,
             min_box_area=config.min_box_area,
             frame_range=(0, config.bootstrap_smoke_check_frames),
+            target_classes=config.target_classes,
             verbose=False,
         )
         smoke_metrics = evaluate_detection(
@@ -375,6 +384,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         augmentation=train_augmentation,
         min_box_area=config.min_box_area,
         frame_range=(config.bootstrap_frames, None),
+        target_classes=config.target_classes,
     )
 
     val_stream = DetectionStream(
@@ -382,6 +392,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         split="val",
         transform=val_transform,
         min_box_area=config.min_box_area,
+        target_classes=config.target_classes,
     )
 
     # Streaming optimizer (fresh, not carrying bootstrap momentum)
@@ -411,9 +422,12 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     metrics_logger = StreamingMetricsLogger(
         log_dir=run_dir,
         checkpoint_interval=config.checkpoint_interval,
+        class_names=class_mapping.names,
     )
 
     # Evaluation callback
+    if config.checkpoint_interval < 1:
+        raise ValueError("checkpoint_interval must be >= 1")
     eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
 
     def eval_fn(m: nn.Module) -> dict:

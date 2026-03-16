@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 from stream_active_fl.core import (
     DetectionDataset,
     DetectionStream,
+    build_class_mapping,
     detection_collate,
     get_detection_augmentation,
     get_detection_transforms,
@@ -60,8 +61,9 @@ class FederatedDetectionConfig:
     manifest_path: str = ""
     output_dir: str = "outputs/federated/no_filter"
 
-    # Model
+    # Model / classes
     num_classes: int = 11
+    target_classes: Optional[List[str]] = None
     trainable_backbone_layers: int = 3
     image_min_size: int = 480
     image_max_size: int = 1600
@@ -204,6 +206,7 @@ def _bootstrap_or_reuse(
         augmentation=train_augmentation,
         frame_range=(0, config.bootstrap_frames),
         min_box_area=config.min_box_area,
+        target_classes=config.target_classes,
     )
     bootstrap_loader = torch.utils.data.DataLoader(
         bootstrap_dataset,
@@ -248,6 +251,7 @@ def _bootstrap_or_reuse(
         transform=val_transform,
         min_box_area=config.min_box_area,
         frame_range=(0, config.bootstrap_smoke_check_frames),
+        target_classes=config.target_classes,
         verbose=False,
     )
     smoke_metrics = evaluate_detection(
@@ -309,6 +313,11 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
     run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
 
+    class_mapping = build_class_mapping(config.target_classes)
+    if config.target_classes is not None:
+        config.num_classes = class_mapping.num_classes
+        print(f"Target classes ({len(class_mapping.names)}): {', '.join(class_mapping.names)}")
+
     train_transform, val_transform = get_detection_transforms()
     train_augmentation = None
     if config.augment:
@@ -334,6 +343,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         transform=val_transform,
         min_box_area=config.min_box_area,
         frame_range=(0, config.val_frame_limit) if config.val_frame_limit else None,
+        target_classes=config.target_classes,
         verbose=False,
     )
 
@@ -345,6 +355,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         augmentation=train_augmentation,
         min_box_area=config.min_box_area,
         frame_range=(config.bootstrap_frames, None),
+        target_classes=config.target_classes,
         verbose=False,
     )
     stream_frames = len(train_stream_for_len)
@@ -370,7 +381,12 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         for _ in range(config.num_clients)
     ]
 
-    fed_logger = FederatedMetricsLogger(log_dir=run_dir, num_clients=config.num_clients, task="detection")
+    fed_logger = FederatedMetricsLogger(
+        log_dir=run_dir,
+        num_clients=config.num_clients,
+        task="detection",
+        class_names=class_mapping.names,
+    )
 
     elapsed_seconds = lambda: (datetime.now() - start_time).total_seconds()
     global_state = global_model.state_dict()
@@ -423,6 +439,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 augmentation=train_augmentation,
                 min_box_area=config.min_box_area,
                 frame_range=stream_slice,
+                target_classes=config.target_classes,
                 verbose=False,
             )
 

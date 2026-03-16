@@ -5,8 +5,9 @@
 manifest_path: "data/Frames_1600x480/manifest.json"
 output_dir: "outputs/streaming/gradient_norm_filter"
 
-# Model
+# Model / classes
 num_classes: 11
+target_classes: null  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -16,7 +17,7 @@ load_checkpoint: null
 
 # Bootstrap phase (set bootstrap_run_dir to reuse a previous bootstrap)
 bootstrap_run_dir: null
-bootstrap_frames: 5000
+bootstrap_frames: 2000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4

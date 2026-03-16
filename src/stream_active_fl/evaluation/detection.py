@@ -13,16 +13,16 @@ Primary metrics reported:
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
 from torchvision.ops import box_iou
 
-from ..core import CATEGORY_ID_TO_NAME, DetectionStream
+from ..core import CATEGORY_ID_TO_NAME, ClassMapping, DetectionStream
 
 
-# Model labels are shifted +1 from annotation IDs (torchvision reserves 0 for background)
+# Default label-to-name for all ZOD classes (model labels are +1 from annotation IDs)
 DETECTION_LABEL_TO_NAME: Dict[int, str] = {
     k + 1: v for k, v in CATEGORY_ID_TO_NAME.items()
 }
@@ -38,6 +38,7 @@ def evaluate_detection(
     device: torch.device,
     score_threshold: float = 0.3,
     iou_thresholds: Sequence[float] = COCO_IOU_THRESHOLDS,
+    class_mapping: Optional[ClassMapping] = None,
 ) -> Dict[str, float]:
     """
     Evaluate detection model on a validation stream with COCO-style metrics.
@@ -48,6 +49,9 @@ def evaluate_detection(
         device: Device to run evaluation on.
         score_threshold: Minimum score to consider a prediction.
         iou_thresholds: IoU thresholds for AP computation.
+        class_mapping: Optional ClassMapping for per-class AP reporting.
+            When None, uses the stream's class_mapping if available,
+            otherwise falls back to all ZOD classes.
 
     Returns:
         Dict with mAP, mAP_50, mAP_75, per-class APs, and counts.
@@ -124,7 +128,13 @@ def evaluate_detection(
         "total_ground_truth": float(total_gt),
     }
 
-    for label, name in DETECTION_LABEL_TO_NAME.items():
+    label_map = DETECTION_LABEL_TO_NAME
+    if class_mapping is not None:
+        label_map = class_mapping.label_to_name
+    elif hasattr(val_stream, "class_mapping"):
+        label_map = val_stream.class_mapping.label_to_name
+
+    for label, name in label_map.items():
         class_aps = [ap_matrix[t].get(label, 0.0) for t in iou_thresholds]
         metrics[f"AP_{name}"] = sum(class_aps) / len(class_aps)
 

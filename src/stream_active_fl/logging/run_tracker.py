@@ -74,7 +74,7 @@ def save_run_info(
     end_time: Optional[datetime] = None,
     best_epoch: Optional[int] = None,
     best_metric: Optional[float] = None,
-    best_metric_name: str = "val_f1",
+    best_metric_name: str = "val_mAP",
     metric_key: Optional[str] = None,
     dataset_info: Optional[Dict[str, Any]] = None,
     extra_info: Optional[Dict[str, Any]] = None,
@@ -92,6 +92,7 @@ def save_run_info(
         best_epoch: Epoch with best metric.
         best_metric: Best metric value achieved.
         best_metric_name: Name of the metric (used when metric_key is None).
+            Default val_mAP for detection runs.
         metric_key: Override key for the metric. If None, uses "best_{best_metric_name}".
         dataset_info: Optional dataset statistics.
         extra_info: Optional additional info to include.

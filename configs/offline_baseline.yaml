@@ -4,8 +4,9 @@
 manifest_path: "data/Frames_1600x480/manifest.json"
 output_dir: "outputs/offline/baseline"
 
-# Model
+# Model / classes
 num_classes: 11
+target_classes: null  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600

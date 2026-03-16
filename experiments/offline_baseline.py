@@ -18,7 +18,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import torch
 
@@ -30,6 +30,7 @@ from stream_active_fl.core import (
     CATEGORY_ID_TO_NAME,
     DetectionDataset,
     DetectionStream,
+    build_class_mapping,
     detection_collate,
     get_detection_augmentation,
     get_detection_transforms,
@@ -59,8 +60,9 @@ class OfflineBaselineConfig:
     manifest_path: str = ""
     output_dir: str = "outputs/offline/baseline"
 
-    # Model
+    # Model / classes
     num_classes: int = 11
+    target_classes: Optional[List[str]] = None
     trainable_backbone_layers: int = 3
     image_min_size: int = 480
     image_max_size: int = 1600
@@ -86,7 +88,7 @@ class OfflineBaselineConfig:
     # Evaluation
     eval_every_n_epochs: int = 1
     score_threshold: float = 0.3
-    min_box_area: float = 16.0
+    min_box_area: float = 64.0
     bootstrap_smoke_check_frames: int = 200
     bootstrap_smoke_score_threshold: float = 0.3
     bootstrap_smoke_min_map50: float = 0.005
@@ -109,10 +111,11 @@ class OfflineBaselineConfig:
 class EpochLogger:
     """Simple CSV logger for per-epoch training loss and evaluation metrics."""
 
-    def __init__(self, log_dir: Path):
+    def __init__(self, log_dir: Path, class_names: Optional[List[str]] = None):
         self.log_dir = log_dir
         self.csv_path = log_dir / "epochs.csv"
-        per_class_cols = [f"AP_{name}" for name in CATEGORY_ID_TO_NAME.values()]
+        names = class_names if class_names is not None else list(CATEGORY_ID_TO_NAME.values())
+        per_class_cols = [f"AP_{name}" for name in names]
         self.fieldnames = [
             "epoch",
             "train_loss",
@@ -165,6 +168,11 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
 
+    class_mapping = build_class_mapping(config.target_classes)
+    if config.target_classes is not None:
+        config.num_classes = class_mapping.num_classes
+        print(f"Target classes ({len(class_mapping.names)}): {', '.join(class_mapping.names)}")
+
     # Transforms + augmentation
     train_transform, val_transform = get_detection_transforms()
     train_augmentation = None
@@ -181,6 +189,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         transform=train_transform,
         augmentation=train_augmentation,
         min_box_area=config.min_box_area,
+        target_classes=config.target_classes,
     )
 
     val_stream = DetectionStream(
@@ -188,6 +197,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         split="val",
         transform=val_transform,
         min_box_area=config.min_box_area,
+        target_classes=config.target_classes,
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -226,7 +236,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         print(f"LR scheduler: cosine (warmup={config.lr_warmup_epochs}, "
               f"T_max={main_epochs}, eta_min={config.lr * 0.01:.1e})")
 
-    epoch_logger = EpochLogger(run_dir)
+    epoch_logger = EpochLogger(run_dir, class_names=list(class_mapping.names))
     best_mAP = 0.0
     best_epoch = 0
 
@@ -279,6 +289,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
                     transform=val_transform,
                     min_box_area=config.min_box_area,
                     frame_range=(0, config.bootstrap_smoke_check_frames),
+                    target_classes=config.target_classes,
                     verbose=False,
                 )
                 smoke_metrics = evaluate_detection(

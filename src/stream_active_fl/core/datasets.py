@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple
 
@@ -53,6 +54,54 @@ NUM_CLASSES = len(CATEGORY_NAME_TO_ID) + 1  # +1 for background
 
 
 # =============================================================================
+# Class mapping (for training/evaluating on a subset of classes)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ClassMapping:
+    """Contiguous ID mapping for a (sub)set of object classes.
+
+    When all classes are used, IDs match the original CATEGORY_NAME_TO_ID.
+    When a subset is selected, IDs are remapped to 0..N-1 (model labels 1..N).
+    """
+
+    names: Tuple[str, ...]
+    name_to_id: Dict[str, int]
+    id_to_name: Dict[int, str]
+    label_to_name: Dict[int, str]
+    num_classes: int
+
+
+def build_class_mapping(target_classes: Optional[List[str]] = None) -> ClassMapping:
+    """Build a ClassMapping from a list of class names.
+
+    When target_classes is None, uses all ZOD classes in original order.
+    """
+    if target_classes is None:
+        names = tuple(CATEGORY_NAME_TO_ID.keys())
+    else:
+        for name in target_classes:
+            if name not in CATEGORY_NAME_TO_ID:
+                raise ValueError(
+                    f"Unknown class: {name!r}. Valid: {list(CATEGORY_NAME_TO_ID)}"
+                )
+        names = tuple(target_classes)
+
+    name_to_id = {name: i for i, name in enumerate(names)}
+    id_to_name = {i: name for i, name in enumerate(names)}
+    label_to_name = {i + 1: name for i, name in enumerate(names)}
+
+    return ClassMapping(
+        names=names,
+        name_to_id=name_to_id,
+        id_to_name=id_to_name,
+        label_to_name=label_to_name,
+        num_classes=len(names) + 1,
+    )
+
+
+# =============================================================================
 # Manifest helpers
 # =============================================================================
 
@@ -71,24 +120,39 @@ def _load_annotation(ann_path: Path) -> Dict[str, Any]:
 
 def format_detection_annotations(
     raw_anns: List[Dict[str, Any]],
+    class_mapping: Optional[ClassMapping] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Convert raw annotation list to torchvision-format detection target.
 
     Bounding boxes are already in [x1, y1, x2, y2] format from preprocessing.
-    Category IDs are shifted by +1 (torchvision reserves 0 for background).
+    Labels are shifted by +1 (torchvision reserves 0 for background).
+
+    When class_mapping is provided, only annotations for target classes are
+    kept and labels are remapped to contiguous IDs.
     """
+    empty = {
+        "boxes": torch.zeros((0, 4), dtype=torch.float32),
+        "labels": torch.zeros((0,), dtype=torch.int64),
+    }
     if not raw_anns:
-        return {
-            "boxes": torch.zeros((0, 4), dtype=torch.float32),
-            "labels": torch.zeros((0,), dtype=torch.int64),
-        }
+        return empty
 
     boxes = []
     labels = []
     for ann in raw_anns:
+        if class_mapping is not None:
+            cat_name = ann.get("category_name", "")
+            if cat_name not in class_mapping.name_to_id:
+                continue
+            label = class_mapping.name_to_id[cat_name] + 1
+        else:
+            label = ann["category_id"] + 1
         boxes.append(ann["bbox_xyxy"])
-        labels.append(ann["category_id"] + 1)
+        labels.append(label)
+
+    if not boxes:
+        return empty
 
     return {
         "boxes": torch.tensor(boxes, dtype=torch.float32),
@@ -234,6 +298,9 @@ class DetectionDataset(Dataset):
         frame_range: Optional (start, end) index range into the
             chronologically-sorted manifest to select a subset of frames
             (e.g. first 1000 for bootstrap).
+        target_classes: Optional list of class names to train on. When set,
+            only annotations for these classes are kept and labels are remapped
+            to contiguous IDs. None means all classes.
         verbose: Print dataset statistics after loading.
 
     Item format:
@@ -250,6 +317,7 @@ class DetectionDataset(Dataset):
         augmentation: Optional[DetectionAugmentation] = None,
         min_box_area: float = 0.0,
         frame_range: Optional[Tuple[int, int]] = None,
+        target_classes: Optional[List[str]] = None,
         verbose: bool = True,
     ):
         self.manifest_path = Path(manifest_path)
@@ -258,14 +326,13 @@ class DetectionDataset(Dataset):
         self.transform = transform
         self.augmentation = augmentation
         self.min_box_area = min_box_area
+        self.class_mapping = build_class_mapping(target_classes)
 
         manifest = load_manifest(self.manifest_path)
         all_frames = manifest["frames"]
 
-        # Filter by split
         split_frames = [f for f in all_frames if f["split"] == split]
 
-        # Apply frame range (chronological subset)
         if frame_range is not None:
             start, end = frame_range
             split_frames = split_frames[start:end]
@@ -279,6 +346,7 @@ class DetectionDataset(Dataset):
         total = len(self.frames)
         with_objects = sum(1 for f in self.frames if f["num_objects"] > 0)
         total_anns = sum(f["num_objects"] for f in self.frames)
+        classes_str = ", ".join(self.class_mapping.names)
 
         print()
         print("=" * 60)
@@ -286,12 +354,12 @@ class DetectionDataset(Dataset):
         print("=" * 60)
         print(f"  Manifest         : {self.manifest_path}")
         print(f"  Split            : {self.split}")
-        print(f"  Categories       : {len(CATEGORY_NAME_TO_ID)}")
+        print(f"  Classes ({len(self.class_mapping.names)}): {classes_str}")
         print("-" * 60)
         print(f"  Total frames     : {total}")
         print(f"  Frames with objs : {with_objects} ({100 * with_objects / max(total, 1):.1f}%)")
-        print(f"  Total annotations: {total_anns}")
-        print(f"  Avg objects/frame: {total_anns / max(total, 1):.1f}")
+        print(f"  Total annotations: {total_anns} (before class filter)")
+        print(f"  Avg objects/frame: {total_anns / max(total, 1):.1f} (before class filter)")
         print("=" * 60)
         print()
 
@@ -315,9 +383,10 @@ class DetectionDataset(Dataset):
         except Exception:
             ann_data = {"annotations": []}
 
-        target = format_detection_annotations(ann_data.get("annotations", []))
+        target = format_detection_annotations(
+            ann_data.get("annotations", []), self.class_mapping,
+        )
 
-        # Apply detection augmentation
         if self.augmentation is not None:
             img, target = self.augmentation(img, target)
 
@@ -355,6 +424,7 @@ class DetectionStream:
         augmentation: Optional DetectionAugmentation.
         min_box_area: Minimum box area to keep. Set 0 to disable.
         frame_range: Optional (start, end) index range to select a subset.
+        target_classes: Optional list of class names. None means all classes.
         verbose: Print dataset statistics after loading.
     """
 
@@ -366,6 +436,7 @@ class DetectionStream:
         augmentation: Optional[DetectionAugmentation] = None,
         min_box_area: float = 0.0,
         frame_range: Optional[Tuple[int, int]] = None,
+        target_classes: Optional[List[str]] = None,
         verbose: bool = True,
     ):
         self.manifest_path = Path(manifest_path)
@@ -374,6 +445,7 @@ class DetectionStream:
         self.transform = transform
         self.augmentation = augmentation
         self.min_box_area = min_box_area
+        self.class_mapping = build_class_mapping(target_classes)
 
         manifest = load_manifest(self.manifest_path)
         all_frames = manifest["frames"]
@@ -392,6 +464,7 @@ class DetectionStream:
     def _print_summary(self) -> None:
         total = len(self.frames)
         with_objects = sum(1 for f in self.frames if f["num_objects"] > 0)
+        classes_str = ", ".join(self.class_mapping.names)
 
         print()
         print("=" * 60)
@@ -399,6 +472,7 @@ class DetectionStream:
         print("=" * 60)
         print(f"  Manifest     : {self.manifest_path}")
         print(f"  Split        : {self.split}")
+        print(f"  Classes ({len(self.class_mapping.names)}): {classes_str}")
         print(f"  Total frames : {total}")
         print(f"  With objects : {with_objects} ({100 * with_objects / max(total, 1):.1f}%)")
         print(f"  Stream order : chronological (by frame_id)")
@@ -428,12 +502,15 @@ class DetectionStream:
         except Exception:
             ann_data = {"annotations": [], "categories_present": []}
 
-        annotations = format_detection_annotations(ann_data.get("annotations", []))
+        annotations = format_detection_annotations(
+            ann_data.get("annotations", []), self.class_mapping,
+        )
         annotations = filter_small_boxes(annotations, self.min_box_area)
+        label_map = self.class_mapping.label_to_name
         categories: Set[str] = {
-            CATEGORY_ID_TO_NAME[int(label.item()) - 1]
+            label_map[int(label.item())]
             for label in annotations["labels"]
-            if int(label.item()) - 1 in CATEGORY_ID_TO_NAME
+            if int(label.item()) in label_map
         }
 
         if self.augmentation is not None:
