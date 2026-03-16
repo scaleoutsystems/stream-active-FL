@@ -2,7 +2,7 @@
 # Accepts frames where the model's detection confidence is low
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest.json"
+manifest_path: "data/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/uncertainty_filter"
 
 # Model / classes
