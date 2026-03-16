@@ -20,9 +20,9 @@ from stream_active_fl.models import Detector
 T = TypeVar("T")
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Config loading
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
@@ -53,13 +53,13 @@ def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
     return config_cls(**data)
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Run setup
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def create_run_dir(base_output_dir: Path) -> Path:
-    """Create a timestamped run directory under *base_output_dir*."""
+    """Create a timestamped run directory under base_output_dir."""
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = base_output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -67,23 +67,23 @@ def create_run_dir(base_output_dir: Path) -> Path:
 
 
 def setup_run_dir(project_root: Path, output_dir: str | Path, config_path: Path) -> Path:
-    """Create run directory under *output_dir* and copy config there."""
+    """Create run directory under output_dir and copy config there."""
     run_dir = create_run_dir(project_root / Path(output_dir))
     shutil.copy(config_path, run_dir / "config.yaml")
     return run_dir
 
 
 def resolve_manifest_path(project_root: Path, manifest_path: str | Path) -> Path:
-    """Resolve *manifest_path* relative to *project_root* when not absolute."""
+    """Resolve manifest_path relative to project_root when not absolute."""
     resolved = Path(manifest_path)
     if not resolved.is_absolute():
         resolved = project_root / resolved
     return resolved
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Model building
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def build_detector_from_config(config: Any) -> Detector:
