@@ -8,7 +8,6 @@ dependencies = [
     "torch>=2.0",
     "torchvision>=0.15",
     "numpy",
-    "scipy",
     "pillow",
     "tqdm",
     "pyyaml",
@@ -18,7 +17,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "black",
     "ruff",
 ]
 
@@ -29,12 +27,23 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "experiments", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
 [tool.pyright]
 pythonVersion = "3.10"
-include = ["src", "experiments"]
+include = ["src", "experiments", "tests"]
 extraPaths = ["src"]
 
 [tool.basedpyright]
 pythonVersion = "3.10"
-include = ["src", "experiments"]
+include = ["src", "experiments", "tests"]
 extraPaths = ["src"]
