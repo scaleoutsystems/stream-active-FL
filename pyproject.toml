@@ -38,11 +38,6 @@ src = ["src", "experiments", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
-[tool.pyright]
-pythonVersion = "3.10"
-include = ["src", "experiments", "tests"]
-extraPaths = ["src"]
-
 [tool.basedpyright]
 pythonVersion = "3.10"
 include = ["src", "experiments", "tests"]
