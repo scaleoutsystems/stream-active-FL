@@ -236,3 +236,6 @@ data/
 nohup.out
 notebooks/
 notes/
+
+# Local Slurm variants
+slurm/local/
