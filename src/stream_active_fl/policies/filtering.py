@@ -574,7 +574,7 @@ class GradientNormPolicy(FilterPolicy):
             "labels": stream_item.annotations["labels"].to(device),
         }
         loss_dict = model([image], [target])
-        loss = sum(loss_dict.values())
+        loss = torch.stack(list(loss_dict.values())).sum()
 
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         grads = torch.autograd.grad(

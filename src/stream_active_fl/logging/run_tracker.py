@@ -24,14 +24,18 @@ def get_git_info(repo_path: Optional[Path] = None) -> Dict[str, Any]:
         Dict with 'commit' (str or None) and 'dirty' (bool or None).
     """
     try:
-        kwargs = {"capture_output": True, "text": True}
-        if repo_path is not None:
-            kwargs["cwd"] = repo_path
+        cwd = str(repo_path) if repo_path is not None else None
 
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], **kwargs)
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=cwd,
+        )
         commit_hash = commit.stdout.strip() if commit.returncode == 0 else None
 
-        status = subprocess.run(["git", "status", "--porcelain"], **kwargs)
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, cwd=cwd,
+        )
         is_dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
 
         return {"commit": commit_hash, "dirty": is_dirty}

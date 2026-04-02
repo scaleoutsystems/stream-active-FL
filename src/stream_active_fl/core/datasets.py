@@ -251,7 +251,7 @@ class DetectionAugmentation:
             image = self.color_jitter_transform(image)
 
         if random.random() < self.hflip_prob:
-            image = F.hflip(image)
+            image = F.hflip(image)  # type: ignore[arg-type]  # accepts PIL at runtime
             boxes = target["boxes"]
             if len(boxes) > 0:
                 width = image.width
@@ -393,10 +393,11 @@ class DetectionDataset(Dataset):
         # Optional training-time filtering for very small boxes
         target = filter_small_boxes(target, self.min_box_area)
 
-        # Apply image transform
+        # Apply image transform (PIL to Tensor)
         if self.transform is not None:
             img = self.transform(img)
 
+        assert isinstance(img, torch.Tensor)
         return img, target
 
     def get_frame_entry(self, index: int) -> Dict[str, Any]:
@@ -519,6 +520,8 @@ class DetectionStream:
         if self.transform is not None:
             img = self.transform(img)
 
+        assert isinstance(img, torch.Tensor)
+
         metadata = {
             "global_idx": global_idx,
             "frame_id": frame_entry["frame_id"],
@@ -546,10 +549,12 @@ def detection_collate(
     Filters out None samples and returns (images, targets) as lists,
     which is the format expected by torchvision detection models.
     """
-    batch = [b for b in batch if b is not None]
-    if len(batch) == 0:
+    valid: List[Tuple[torch.Tensor, Dict[str, torch.Tensor]]] = [
+        b for b in batch if b is not None
+    ]
+    if len(valid) == 0:
         return None
 
-    images = [b[0] for b in batch]
-    targets = [b[1] for b in batch]
+    images = [b[0] for b in valid]
+    targets = [b[1] for b in valid]
     return images, targets
