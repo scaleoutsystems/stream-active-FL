@@ -7,7 +7,9 @@
 #SBATCH --job-name=prep_zod
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/prep_zod_%j.out
 #SBATCH --error=/project/home/p201222/data/ZOD_frames_preprocessed/logs/prep_zod_%j.err
+
 set -euo pipefail
+
 module --force purge
 module load env/staging/2023.1
 module load PyTorch-bundle/2.1.2-foss-2023a-CUDA-12.1.1
