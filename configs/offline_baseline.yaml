@@ -1,7 +1,7 @@
 # Offline baseline: multi-epoch shuffled training on all frames (performance ceiling)
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest.json"
 output_dir: "outputs/offline/baseline"
 
 # Model / classes

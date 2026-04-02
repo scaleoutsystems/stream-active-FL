@@ -2,7 +2,7 @@
 # Compare content-based filtering vs random selection
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest_temporal.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/random_filter"
 
 # Model / classes

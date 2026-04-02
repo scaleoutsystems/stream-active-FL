@@ -2,7 +2,7 @@
 # Accepts frames whose backbone embedding is on the tail of the distribution
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest_temporal.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/distribution_filter"
 
 # Model / classes

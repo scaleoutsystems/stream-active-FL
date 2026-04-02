@@ -1,7 +1,7 @@
 # Streaming detection: no filtering baseline (accept all)
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest_temporal.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/no_filter"
 
 # Model / classes

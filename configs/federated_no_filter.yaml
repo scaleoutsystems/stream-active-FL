@@ -1,7 +1,7 @@
 # Federated streaming detection (simulated FL with FedAvg)
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest.json"
 output_dir: "outputs/federated/no_filter"
 
 # Model / classes

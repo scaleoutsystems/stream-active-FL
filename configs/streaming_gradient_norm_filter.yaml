@@ -2,7 +2,7 @@
 # Accepts frames with the largest parameter gradient norms
 
 # Paths
-manifest_path: "data/Frames_1600x480/manifest_temporal.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/streaming/gradient_norm_filter"
 
 # Model / classes
