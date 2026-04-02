@@ -12,7 +12,7 @@ Phase 2 -- Streaming:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sized, Tuple
 
 import torch
 import torch.nn as nn
@@ -73,7 +73,8 @@ def bootstrap_train(
         running_loss = 0.0
         n_batches = 0
 
-        loader = tqdm(train_loader, desc=f"Bootstrap epoch {epoch + 1}/{epochs}") if progress_bar else train_loader
+        pbar = tqdm(train_loader, desc=f"Bootstrap epoch {epoch + 1}/{epochs}") if progress_bar else None
+        loader: Iterable = pbar if pbar is not None else train_loader
 
         for batch in loader:
             if batch is None:
@@ -88,7 +89,7 @@ def bootstrap_train(
 
             optimizer.zero_grad()
             loss_dict = model(images, targets)
-            loss = sum(loss_dict.values())
+            loss = torch.stack(list(loss_dict.values())).sum()
             loss.backward()
 
             if max_grad_norm > 0:
@@ -102,8 +103,8 @@ def bootstrap_train(
             running_loss += loss.item()
             n_batches += 1
 
-            if progress_bar and hasattr(loader, "set_postfix"):
-                loader.set_postfix(loss=f"{loss.item():.4f}")
+            if pbar is not None:
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         avg_loss = running_loss / max(n_batches, 1)
         epoch_logs.append({"epoch": epoch + 1, "avg_loss": avg_loss, "batches": n_batches})
@@ -219,7 +220,7 @@ def train_on_stream(
     Returns:
         StreamingTrainResult with processing statistics.
     """
-    if total_items is None and hasattr(stream, "__len__"):
+    if total_items is None and isinstance(stream, Sized):
         total_items = len(stream)
     if train_steps_per_buffer < 1:
         raise ValueError("train_steps_per_buffer must be >= 1")
@@ -245,7 +246,7 @@ def train_on_stream(
 
         optimizer.zero_grad()
         loss_dict = model(images, targets)
-        loss = sum(loss_dict.values())
+        loss = torch.stack(list(loss_dict.values())).sum()
         loss.backward()
 
         if max_grad_norm > 0:
@@ -275,9 +276,10 @@ def train_on_stream(
 
         training_buffer.clear()
 
-    pbar = tqdm(stream, desc="Streaming", total=total_items) if progress_bar else stream
+    pbar = tqdm(stream, desc="Streaming", total=total_items) if progress_bar else None
+    item_iter: Iterable[StreamItem] = pbar if pbar is not None else stream
 
-    for stream_item in pbar:
+    for stream_item in item_iter:
         items_processed += 1
 
         # Filter decision
@@ -352,7 +354,7 @@ def train_on_stream(
                 eval_metrics = eval_fn(model)
                 metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
 
-                if progress_bar and hasattr(pbar, "set_postfix"):
+                if pbar is not None:
                     pbar.set_postfix({
                         "mAP": f"{eval_metrics.get('mAP', 0.0):.3f}",
                         "accept": f"{filter_stats.get('accept_rate', 1.0):.2f}",
