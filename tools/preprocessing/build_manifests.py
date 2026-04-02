@@ -17,12 +17,12 @@ Usage:
   Generate everything:
     python tools/preprocessing/build_manifests.py \\
         --data-dir data/Frames_1600x480 \\
-        --zod-root /mnt/ZOD_clone_2018_scaleout_zenseact
+        --zod-root /path/to/zod
 
   Generate only the base manifest:
     python tools/preprocessing/build_manifests.py \\
         --data-dir data/Frames_1600x480 \\
-        --zod-root /mnt/ZOD_clone_2018_scaleout_zenseact \\
+        --zod-root /path/to/zod \\
         --variants base
 
   Generate only ordering variants (base manifest must already exist):
@@ -39,12 +39,14 @@ import sys
 from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal, cast
 
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CATEGORY_NAME_TO_ID, CROP_PARAMS, RESIZE_HEIGHT, RESIZE_WIDTH
+
+ZodVersion = Literal["full", "mini"]
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +73,7 @@ def save_manifest(path: Path, manifest: Dict[str, Any]) -> None:
 def _load_zod_metadata(
     frame_ids: List[str],
     zod_root: str,
-    zod_version: str,
+    zod_version: ZodVersion,
 ) -> Dict[str, Dict[str, Any]]:
     """Load timestamps, train/val splits, and road type from ZOD."""
     from zod import ZodFrames
@@ -148,7 +150,7 @@ def build_base(
     data_dir: Path,
     frame_ids: List[str],
     zod_meta: Dict[str, Dict[str, Any]],
-    zod_version: str,
+    zod_version: ZodVersion,
 ) -> Dict[str, Any]:
     """Generate manifest.json by scanning images/annotations and adding ZOD metadata."""
     annotations_dir = data_dir / "annotations"
@@ -297,6 +299,7 @@ def main() -> None:
         raise FileNotFoundError(f"No images/ directory in {data_dir}")
 
     variants = args.variants
+    zod_version = cast(ZodVersion, args.zod_version)
     needs_zod = any(v in variants for v in ["base", "road_type", "urban_rural"])
     if needs_zod and not args.zod_root:
         parser.error("--zod-root is required for 'base', 'road_type', and 'urban_rural' variants")
@@ -308,11 +311,13 @@ def main() -> None:
     # Load ZOD metadata once (needed for base + metadata variants)
     zod_meta = None
     if needs_zod:
-        zod_meta = _load_zod_metadata(frame_ids, args.zod_root, args.zod_version)
+        zod_meta = _load_zod_metadata(frame_ids, args.zod_root, zod_version)
 
     # Base manifest
     if "base" in variants:
-        manifest = build_base(data_dir, frame_ids, zod_meta, args.zod_version)
+        if zod_meta is None:
+            raise RuntimeError("Internal error: zod metadata not loaded for base variant.")
+        manifest = build_base(data_dir, frame_ids, zod_meta, zod_version)
         save_manifest(data_dir / "manifest.json", manifest)
         print(f"[base] wrote: {data_dir / 'manifest.json'}")
     else:
@@ -330,11 +335,15 @@ def main() -> None:
         print(f"[temporal] wrote: {data_dir / 'manifest_temporal.json'}")
 
     if "road_type" in variants:
+        if zod_meta is None:
+            raise RuntimeError("Internal error: zod metadata not loaded for road_type variant.")
         m = build_road_type(manifest, zod_meta)
         save_manifest(data_dir / "manifest_road_type.json", m)
         print(f"[road_type] wrote: {data_dir / 'manifest_road_type.json'}")
 
     if "urban_rural" in variants:
+        if zod_meta is None:
+            raise RuntimeError("Internal error: zod metadata not loaded for urban_rural variant.")
         m = build_urban_rural(manifest, zod_meta)
         save_manifest(data_dir / "manifest_urban_rural.json", m)
         print(f"[urban_rural] wrote: {data_dir / 'manifest_urban_rural.json'}")

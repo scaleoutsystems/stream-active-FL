@@ -7,6 +7,7 @@ streaming, federated) so each script focuses on its own pipeline logic.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import is_dataclass
 from datetime import datetime
@@ -74,10 +75,26 @@ def setup_run_dir(project_root: Path, output_dir: str | Path, config_path: Path)
 
 
 def resolve_manifest_path(project_root: Path, manifest_path: str | Path) -> Path:
-    """Resolve manifest_path relative to project_root when not absolute."""
+    """
+    Resolve manifest path with optional shared-data override.
+
+    Resolution order:
+      1) Absolute path as-is.
+      2) Path relative to project_root.
+      3) For paths under "data/", map to $STREAM_ACTIVE_FL_DATA_ROOT if set.
+    """
     resolved = Path(manifest_path)
     if not resolved.is_absolute():
-        resolved = project_root / resolved
+        project_candidate = project_root / resolved
+        if project_candidate.exists():
+            return project_candidate
+
+        if resolved.parts and resolved.parts[0] == "data":
+            data_root = os.environ.get("STREAM_ACTIVE_FL_DATA_ROOT")
+            if data_root:
+                return Path(data_root) / Path(*resolved.parts[1:])
+
+        return project_candidate
     return resolved
 
 

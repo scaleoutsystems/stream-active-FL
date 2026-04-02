@@ -95,7 +95,7 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     # Crop and resize
     cropped = crop_image(img_np)
     pil_img = Image.fromarray(cropped)
-    resized = pil_img.resize((RESIZE_WIDTH, RESIZE_HEIGHT), Image.LANCZOS)
+    resized = pil_img.resize((RESIZE_WIDTH, RESIZE_HEIGHT), Image.Resampling.LANCZOS)
 
     # Save image
     img_path = images_dir / f"{frame_id}.jpg"
@@ -164,6 +164,13 @@ def main() -> None:
     parser.add_argument("--version", type=str, default="full", choices=["full", "mini"])
     parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR))
     args = parser.parse_args()
+
+    # Guard against placeholder defaults in fresh setups
+    if args.zod_root == "/path/to/zod":
+        parser.error(
+            "--zod-root is not set. Pass your dataset root explicitly or set "
+            "STREAM_ACTIVE_FL_ZOD_ROOT."
+        )
 
     output_dir = Path(args.output_dir)
     images_dir = output_dir / "images"

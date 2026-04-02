@@ -8,14 +8,28 @@ Used by:
 
 from pathlib import Path
 from typing import Dict
+import os
 
 # =============================================================================
 # Paths
 # =============================================================================
 
-ORIGINAL_ZOD_ROOT = Path("/mnt/ZOD_clone_2018_scaleout_zenseact")
+# You can override these per machine through environment variables.
+DATA_ROOT = Path(os.environ.get("STREAM_ACTIVE_FL_DATA_ROOT", "data"))
 
-OUTPUT_BASE = Path("/mnt/pr_2018_scaleout_workdir/ZOD256")
+ORIGINAL_ZOD_ROOT = Path(
+    os.environ.get(
+        "STREAM_ACTIVE_FL_ZOD_ROOT",
+        "/path/to/zod",
+    )
+)
+
+OUTPUT_BASE = Path(
+    os.environ.get(
+        "STREAM_ACTIVE_FL_PREPROCESSED_ROOT",
+        str(DATA_ROOT / "ZOD_frames_preprocessed"),
+    )
+)
 
 # =============================================================================
 # Crop parameters
