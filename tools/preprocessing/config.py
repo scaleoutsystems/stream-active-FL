@@ -6,9 +6,9 @@ Used by:
   build_manifests.py - (re)generate manifest.json and ordering variants
 """
 
-from pathlib import Path
-from typing import Dict
 import os
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 # =============================================================================
 # Paths
@@ -45,8 +45,8 @@ CROP_PARAMS = {
     "width": 3840,
 }
 
-CROP_WIDTH = CROP_PARAMS["width"]    # 3840
-CROP_HEIGHT = CROP_PARAMS["height"]  # 1152
+CROP_WIDTH = CROP_PARAMS["width"]
+CROP_HEIGHT = CROP_PARAMS["height"]
 
 # =============================================================================
 # Resize parameters
@@ -85,3 +85,16 @@ NUM_CLASSES = len(CATEGORY_NAME_TO_ID) + 1  # +1 for background (label 0 in torc
 
 # Keep all annotations at preprocessing time; filter at training time if needed.
 MIN_BOX_AREA = 0
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def extract_timestamp(metadata: Any) -> Optional[str]:
+    """Return an ISO-8601 timestamp string from a ZOD frame metadata object, or None."""
+    if hasattr(metadata, "time") and metadata.time is not None:
+        ts = metadata.time
+        return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+    return None

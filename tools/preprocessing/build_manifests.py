@@ -44,30 +44,38 @@ from typing import Any, Dict, List, Literal, cast
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import CATEGORY_NAME_TO_ID, CROP_PARAMS, RESIZE_HEIGHT, RESIZE_WIDTH
+from config import (
+    CATEGORY_NAME_TO_ID,
+    CROP_PARAMS,
+    RESIZE_HEIGHT,
+    RESIZE_WIDTH,
+    extract_timestamp,
+)
 
 ZodVersion = Literal["full", "mini"]
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # IO
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def load_manifest(path: Path) -> Dict[str, Any]:
+    """Read a manifest JSON file and return its contents as a dict."""
     with path.open("r") as f:
         return json.load(f)
 
 
 def save_manifest(path: Path, manifest: Dict[str, Any]) -> None:
+    """Write a manifest dict to *path* as pretty-printed JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
         json.dump(manifest, f, indent=2)
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # ZOD metadata
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def _load_zod_metadata(
@@ -79,29 +87,24 @@ def _load_zod_metadata(
     from zod import ZodFrames
     from zod.constants import TRAIN, VAL
 
-    zod = ZodFrames(zod_root, zod_version)
-    train_ids = zod.get_split(TRAIN)
-    val_ids = zod.get_split(VAL)
+    zod_frames = ZodFrames(zod_root, zod_version)
+    train_ids = zod_frames.get_split(TRAIN)
+    val_ids = zod_frames.get_split(VAL)
 
     meta: Dict[str, Dict[str, Any]] = {}
     for fid in tqdm(frame_ids, desc="Loading ZOD metadata"):
-        m = zod[fid].metadata
-        timestamp = None
-        if hasattr(m, "time") and m.time is not None:
-            ts = m.time
-            timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-
+        frame_meta = zod_frames[fid].metadata
         meta[fid] = {
-            "timestamp": timestamp,
+            "timestamp": extract_timestamp(frame_meta),
             "split": "train" if fid in train_ids else ("val" if fid in val_ids else "unknown"),
-            "road_type": str(getattr(m, "road_type", "unknown") or "unknown"),
+            "road_type": str(getattr(frame_meta, "road_type", "unknown") or "unknown"),
         }
     return meta
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Helpers
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def _temporal_key(frame: Dict[str, Any]) -> tuple[int, str, str]:
@@ -125,7 +128,10 @@ def _replace_train_order(
             idx += 1
         else:
             out.append(f)
-    assert idx == len(reordered_train), "Train frame count mismatch."
+    if idx != len(reordered_train):
+        raise ValueError(
+            f"Train frame count mismatch: expected {len(reordered_train)}, placed {idx}"
+        )
     return out
 
 
@@ -141,9 +147,9 @@ def _urban_rural_bucket(road_type: str) -> str:
     return "other"
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Builders
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 
 def build_base(
@@ -269,9 +275,9 @@ def build_urban_rural(
     return out
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # CLI
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 ALL_VARIANTS = ["base", "temporal", "road_type", "urban_rural"]
 

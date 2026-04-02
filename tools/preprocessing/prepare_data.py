@@ -42,6 +42,7 @@ from config import (
     OUTPUT_DIR,
     RESIZE_HEIGHT,
     RESIZE_WIDTH,
+    extract_timestamp,
 )
 
 
@@ -82,7 +83,6 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     """Process a single ZOD frame: crop, resize, extract annotations."""
     from zod.constants import Anonymization, AnnotationProject
 
-    # Read image
     try:
         img_np = zod_frame.get_image(Anonymization.BLUR)
     except Exception as e:
@@ -92,18 +92,15 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     if img_np is None:
         return None
 
-    # Crop and resize
     cropped = crop_image(img_np)
     pil_img = Image.fromarray(cropped)
     resized = pil_img.resize((RESIZE_WIDTH, RESIZE_HEIGHT), Image.Resampling.LANCZOS)
 
-    # Save image
     img_path = images_dir / f"{frame_id}.jpg"
     resized.save(img_path, quality=95)
 
-    # Extract annotations
     annotations = []
-    categories_present: list[str] = []
+    categories_seen: set[str] = set()
 
     if zod_frame.is_annotated(AnnotationProject.OBJECT_DETECTION):
         for obj in zod_frame.get_annotation(AnnotationProject.OBJECT_DETECTION):
@@ -127,9 +124,9 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
                 "category_id": CATEGORY_NAME_TO_ID[class_name],
                 "category_name": class_name,
             })
+            categories_seen.add(class_name)
 
-            if class_name not in categories_present:
-                categories_present.append(class_name)
+    categories_present = sorted(categories_seen)
 
     ann_data = {
         "frame_id": frame_id,
@@ -142,19 +139,13 @@ def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: P
     with ann_path.open("w") as f:
         json.dump(ann_data, f, indent=2)
 
-    timestamp = None
-    meta = zod_frame.metadata
-    if hasattr(meta, "time") and meta.time is not None:
-        ts = meta.time
-        timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-
     return {
         "frame_id": frame_id,
         "image_path": str(img_path.relative_to(images_dir.parent)),
         "annotation_path": str(ann_path.relative_to(annotations_dir.parent)),
         "num_objects": len(annotations),
         "categories_present": categories_present,
-        "timestamp": timestamp,
+        "timestamp": extract_timestamp(zod_frame.metadata),
     }
 
 
@@ -165,7 +156,6 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR))
     args = parser.parse_args()
 
-    # Guard against placeholder defaults in fresh setups
     if args.zod_root == "/path/to/zod":
         parser.error(
             "--zod-root is not set. Pass your dataset root explicitly or set "
@@ -210,7 +200,6 @@ def main() -> None:
         entry["split"] = "train" if frame_id in train_ids else "val"
         manifest_entries.append(entry)
 
-    # Sort by frame_id (chronological proxy)
     manifest_entries.sort(key=lambda e: e["frame_id"])
 
     manifest = {
