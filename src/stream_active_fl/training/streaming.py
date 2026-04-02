@@ -54,12 +54,17 @@ def bootstrap_train(
     epochs: int = 10,
     max_grad_norm: float = 0.0,
     progress_bar: bool = True,
+    desc_prefix: str = "Bootstrap",
 ) -> Tuple[List[Dict[str, float]], int]:
     """
     Multi-epoch training on bootstrap frames (standard supervised detection).
 
-    This is the only place where multi-epoch training is allowed. Uses a
-    standard DataLoader with shuffle.
+    Also used by the offline baseline for epoch-level training with the same
+    loop logic (called with epochs=1 per outer epoch).
+
+    Args:
+        desc_prefix: Label shown in the tqdm progress bar (e.g. "Epoch" for
+            offline training, "Bootstrap" for streaming bootstrap phase).
 
     Returns:
         (epoch_logs, total_steps): Per-epoch metrics and total optimizer steps.
@@ -73,7 +78,7 @@ def bootstrap_train(
         running_loss = 0.0
         n_batches = 0
 
-        pbar = tqdm(train_loader, desc=f"Bootstrap epoch {epoch + 1}/{epochs}") if progress_bar else None
+        pbar = tqdm(train_loader, desc=f"{desc_prefix} epoch {epoch + 1}/{epochs}") if progress_bar else None
         loader: Iterable = pbar if pbar is not None else train_loader
 
         for batch in loader:

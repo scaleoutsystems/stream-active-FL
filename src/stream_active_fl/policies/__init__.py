@@ -71,28 +71,28 @@ def create_filter_policy(
             bootstrap_mean=bootstrap_mean,
             bootstrap_cov=bootstrap_cov,
             bootstrap_count=bootstrap_count,
-            mode=getattr(config, "distribution_mode", "mahalanobis"),
+            mode=config.distribution_mode,
             accept_fraction=config.accept_fraction,
-            score_window_size=getattr(config, "score_window_size", 500),
+            score_window_size=config.score_window_size,
             warmup_items=config.warmup_items,
-            embedding_buffer_size=getattr(config, "embedding_buffer_size", 1000),
-            knn_k=getattr(config, "knn_k", 10),
-            update_stats=getattr(config, "update_distribution_stats", True),
+            embedding_buffer_size=config.embedding_buffer_size,
+            knn_k=config.knn_k,
+            update_stats=config.update_distribution_stats,
         )
 
     elif config.filter_policy == "uncertainty":
         return UncertaintyBasedPolicy(
             accept_fraction=config.accept_fraction,
-            score_window_size=getattr(config, "score_window_size", 500),
+            score_window_size=config.score_window_size,
             warmup_items=config.warmup_items,
-            confidence_threshold=getattr(config, "confidence_threshold", 0.1),
-            top_k_detections=getattr(config, "top_k_detections", 5),
+            confidence_threshold=config.confidence_threshold,
+            top_k_detections=config.top_k_detections,
         )
 
     elif config.filter_policy == "gradient_norm":
         return GradientNormPolicy(
             accept_fraction=config.accept_fraction,
-            norm_window_size=getattr(config, "norm_window_size", 500),
+            norm_window_size=config.norm_window_size,
             warmup_items=config.warmup_items,
         )
 

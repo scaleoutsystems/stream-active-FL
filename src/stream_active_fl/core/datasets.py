@@ -316,7 +316,7 @@ class DetectionDataset(Dataset):
         transform: Optional[Callable] = None,
         augmentation: Optional[DetectionAugmentation] = None,
         min_box_area: float = 0.0,
-        frame_range: Optional[Tuple[int, int]] = None,
+        frame_range: Optional[Tuple[int, Optional[int]]] = None,
         target_classes: Optional[List[str]] = None,
         verbose: bool = True,
     ):
@@ -436,7 +436,7 @@ class DetectionStream:
         transform: Optional[Callable] = None,
         augmentation: Optional[DetectionAugmentation] = None,
         min_box_area: float = 0.0,
-        frame_range: Optional[Tuple[int, int]] = None,
+        frame_range: Optional[Tuple[int, Optional[int]]] = None,
         target_classes: Optional[List[str]] = None,
         verbose: bool = True,
     ):

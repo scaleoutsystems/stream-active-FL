@@ -52,7 +52,7 @@ from stream_active_fl.logging import (
 from stream_active_fl.memory import TrainingBuffer
 from stream_active_fl.policies import create_filter_policy
 from stream_active_fl.training import bootstrap_train, collect_embeddings, fedavg, train_on_stream
-from stream_active_fl.utils import set_seed
+from stream_active_fl.utils import set_seed, worker_init_fn
 
 
 @dataclass
@@ -125,6 +125,9 @@ class FederatedDetectionConfig:
     bootstrap_smoke_min_map50: float = 0.005
     bootstrap_fail_on_smoke_check: bool = True
 
+    # DataLoader
+    num_workers: int = 2
+
     # Reproducibility
     seed: int = 42
     device: str = "cuda"
@@ -169,13 +172,13 @@ def _bootstrap_or_reuse(
         print("=" * 60)
 
         model = build_detector_from_config(config)
-        ckpt = torch.load(model_path, map_location="cpu")
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         model = model.to(device)
         print(f"Loaded bootstrap model from {model_path.name}")
 
         if requires_bootstrap_embeddings:
-            embed_data = torch.load(embed_path, map_location="cpu")
+            embed_data = torch.load(embed_path, map_location="cpu", weights_only=True)
             if "count" not in embed_data:
                 raise KeyError(
                     "bootstrap_embeddings.pt is missing required key 'count'. "
@@ -184,6 +187,7 @@ def _bootstrap_or_reuse(
             embedding_mean = embed_data["mean"]
             embedding_cov = embed_data["cov"]
             embedding_count = int(embed_data["count"])
+            assert embedding_mean is not None and embedding_cov is not None
             print(
                 "Loaded embeddings:"
                 f" mean {embedding_mean.shape}, cov {embedding_cov.shape}, n={embedding_count}"
@@ -212,14 +216,16 @@ def _bootstrap_or_reuse(
         bootstrap_dataset,
         batch_size=config.bootstrap_batch_size,
         shuffle=True,
-        num_workers=2,
+        num_workers=config.num_workers,
         collate_fn=detection_collate,
+        worker_init_fn=worker_init_fn,
+        pin_memory=device.type == "cuda",
     )
 
     model = build_detector_from_config(config)
     if config.load_checkpoint:
         checkpoint_path = PROJECT_ROOT / config.load_checkpoint
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
     model = model.to(device)
 
@@ -283,8 +289,10 @@ def _bootstrap_or_reuse(
             bootstrap_dataset,
             batch_size=config.bootstrap_batch_size,
             shuffle=False,
-            num_workers=2,
+            num_workers=config.num_workers,
             collate_fn=detection_collate,
+            worker_init_fn=worker_init_fn,
+            pin_memory=device.type == "cuda",
         )
         embedding_mean, embedding_cov, embedding_count = collect_embeddings(model, embed_loader, device)
         torch.save(

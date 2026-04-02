@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
@@ -52,14 +52,8 @@ class SelectionTracker:
 
     accept_count: int = 0
     reject_count: int = 0
-    accept_by_category: Dict[str, int] = None  # type: ignore[assignment]
-    reject_by_category: Dict[str, int] = None  # type: ignore[assignment]
-
-    def __post_init__(self):
-        if self.accept_by_category is None:
-            self.accept_by_category = {}
-        if self.reject_by_category is None:
-            self.reject_by_category = {}
+    accept_by_category: Dict[str, int] = field(default_factory=dict)
+    reject_by_category: Dict[str, int] = field(default_factory=dict)
 
     def record(self, action: Action, categories: set[str]) -> None:
         """Record a single filter decision."""
@@ -142,6 +136,19 @@ class FilterPolicy(ABC):
     def requires_model_forward(self) -> bool:
         """Whether this policy needs model inference/gradients per item."""
         return True
+
+    @staticmethod
+    def _compute_adaptive_threshold(
+        score_history: deque,
+        accept_fraction: float,
+    ) -> float:
+        """Return the adaptive threshold from a sliding window of scores."""
+        if len(score_history) == 0:
+            return 0.0
+        sorted_scores = sorted(score_history)
+        idx = int(len(sorted_scores) * (1.0 - accept_fraction))
+        idx = min(idx, len(sorted_scores) - 1)
+        return sorted_scores[idx]
 
 
 # =============================================================================
@@ -342,19 +349,15 @@ class DistributionBasedPolicy(FilterPolicy):
         raise ValueError(f"Unknown mode: {self.mode}")
 
     def _get_threshold(self) -> float:
-        if len(self.score_history) == 0:
-            return 0.0
-        sorted_scores = sorted(self.score_history)
-        idx = int(len(sorted_scores) * (1.0 - self.accept_fraction))
-        idx = min(idx, len(sorted_scores) - 1)
-        return sorted_scores[idx]
+        return self._compute_adaptive_threshold(self.score_history, self.accept_fraction)
 
     def _update_running_stats(self, embedding: torch.Tensor) -> None:
         """Incrementally update running mean with a new embedding."""
         self._n_embeddings += 1
         emb = embedding.float()
         self.mean = self.mean + (emb - self.mean) / self._n_embeddings
-        self.embedding_buffer.append(emb.cpu())
+        if self.mode == "knn":
+            self.embedding_buffer.append(emb.cpu())
 
     def select_action(
         self,
@@ -467,12 +470,7 @@ class UncertaintyBasedPolicy(FilterPolicy):
         return 1.0 - mean_conf
 
     def _get_threshold(self) -> float:
-        if len(self.score_history) == 0:
-            return 0.0
-        sorted_scores = sorted(self.score_history)
-        idx = int(len(sorted_scores) * (1.0 - self.accept_fraction))
-        idx = min(idx, len(sorted_scores) - 1)
-        return sorted_scores[idx]
+        return self._compute_adaptive_threshold(self.score_history, self.accept_fraction)
 
     @torch.no_grad()
     def select_action(
@@ -567,6 +565,7 @@ class GradientNormPolicy(FilterPolicy):
         model: nn.Module,
         device: torch.device,
     ) -> float:
+        was_training = model.training
         model.train()
         image = stream_item.image.to(device)
         target = {
@@ -584,15 +583,14 @@ class GradientNormPolicy(FilterPolicy):
         for g in grads:
             if g is not None:
                 total += g.pow(2).sum().item()
+
+        if not was_training:
+            model.eval()
+
         return total ** 0.5
 
     def _get_threshold(self) -> float:
-        if len(self.norm_history) == 0:
-            return 0.0
-        sorted_norms = sorted(self.norm_history)
-        idx = int(len(sorted_norms) * (1.0 - self.accept_fraction))
-        idx = min(idx, len(sorted_norms) - 1)
-        return sorted_norms[idx]
+        return self._compute_adaptive_threshold(self.norm_history, self.accept_fraction)
 
     def select_action(
         self,

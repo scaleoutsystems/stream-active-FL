@@ -44,7 +44,7 @@ from stream_active_fl.experiment import (
 )
 from stream_active_fl.logging import save_run_info
 from stream_active_fl.training import bootstrap_train
-from stream_active_fl.utils import set_seed
+from stream_active_fl.utils import set_seed, worker_init_fn
 
 
 # =============================================================================
@@ -206,6 +206,8 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         shuffle=True,
         num_workers=config.num_workers,
         collate_fn=detection_collate,
+        worker_init_fn=worker_init_fn,
+        pin_memory=device.type == "cuda",
     )
 
     # Model
@@ -214,7 +216,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     if config.load_checkpoint:
         checkpoint_path = PROJECT_ROOT / config.load_checkpoint
         print(f"Loading checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
 
     model = model.to(device)
@@ -262,6 +264,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             epochs=1,
             max_grad_norm=config.max_grad_norm,
             progress_bar=True,
+            desc_prefix=f"Train {epoch}/{config.epochs}",
         )
         epoch_loss = epoch_logs[0]["avg_loss"] if epoch_logs else float("nan")
 

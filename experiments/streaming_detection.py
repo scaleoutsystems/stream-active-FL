@@ -56,7 +56,7 @@ from stream_active_fl.logging import StreamingMetricsLogger, save_run_info
 from stream_active_fl.memory import TrainingBuffer
 from stream_active_fl.policies import create_filter_policy
 from stream_active_fl.training import bootstrap_train, collect_embeddings, train_on_stream
-from stream_active_fl.utils import set_seed
+from stream_active_fl.utils import set_seed, worker_init_fn
 
 
 # =============================================================================
@@ -133,6 +133,9 @@ class StreamingDetectionConfig:
     bootstrap_smoke_score_threshold: float = 0.3
     bootstrap_smoke_min_map50: float = 0.005
     bootstrap_fail_on_smoke_check: bool = True
+
+    # DataLoader
+    num_workers: int = 2
 
     # Reproducibility
     seed: int = 42
@@ -213,22 +216,23 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         if source_config_path.exists():
             with open(source_config_path, "r") as f:
                 source_cfg = yaml.safe_load(f)
-            for key in ("bootstrap_frames", "bootstrap_epochs", "bootstrap_lr",
-                        "bootstrap_batch_size", "min_box_area", "trainable_backbone_layers"):
-                src_val = source_cfg.get(key)
-                cur_val = getattr(config, key, None)
-                if src_val is not None and cur_val is not None and src_val != cur_val:
-                    print(f"  WARNING: {key} differs: source={src_val}, current={cur_val}")
+            if isinstance(source_cfg, dict):
+                for key in ("bootstrap_frames", "bootstrap_epochs", "bootstrap_lr",
+                            "bootstrap_batch_size", "min_box_area", "trainable_backbone_layers"):
+                    src_val = source_cfg.get(key)
+                    cur_val = getattr(config, key, None)
+                    if src_val is not None and cur_val is not None and src_val != cur_val:
+                        print(f"  WARNING: {key} differs: source={src_val}, current={cur_val}")
 
         model = build_detector_from_config(config)
-        ckpt = torch.load(model_path, map_location="cpu")
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         model = model.to(device)
         print(model)
         print(f"Loaded bootstrap model from {model_path.name}")
 
         if requires_bootstrap_embeddings:
-            embed_data = torch.load(embed_path, map_location="cpu")
+            embed_data = torch.load(embed_path, map_location="cpu", weights_only=True)
             embedding_mean = embed_data["mean"]
             embedding_cov = embed_data["cov"]
             if "count" not in embed_data:
@@ -237,6 +241,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                     "Please regenerate bootstrap embeddings with the current code."
                 )
             embedding_count = int(embed_data["count"])
+            assert embedding_mean is not None and embedding_cov is not None
             print(
                 "Loaded embeddings:"
                 f" mean {embedding_mean.shape}, cov {embedding_cov.shape}, n={embedding_count}"
@@ -268,8 +273,10 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             bootstrap_dataset,
             batch_size=config.bootstrap_batch_size,
             shuffle=True,
-            num_workers=2,
+            num_workers=config.num_workers,
             collate_fn=detection_collate,
+            worker_init_fn=worker_init_fn,
+            pin_memory=device.type == "cuda",
         )
 
         model = build_detector_from_config(config)
@@ -277,7 +284,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         if config.load_checkpoint:
             checkpoint_path = PROJECT_ROOT / config.load_checkpoint
             print(f"Loading checkpoint: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location="cpu")
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             model.load_state_dict(ckpt["model_state_dict"])
 
         model = model.to(device)
@@ -354,8 +361,10 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                 bootstrap_dataset,
                 batch_size=config.bootstrap_batch_size,
                 shuffle=False,
-                num_workers=2,
+                num_workers=config.num_workers,
                 collate_fn=detection_collate,
+                worker_init_fn=worker_init_fn,
+                pin_memory=device.type == "cuda",
             )
             embedding_mean, embedding_cov, embedding_count = collect_embeddings(model, embed_loader, device)
             print(f"Embedding mean shape: {embedding_mean.shape}")
