@@ -465,7 +465,7 @@ class UncertaintyBasedPolicy(FilterPolicy):
         if len(scores) == 0:
             return 1.0  # max uncertainty: no detections at all
 
-        top_scores = scores[: self.top_k_detections]
+        top_scores = scores.sort(descending=True).values[: self.top_k_detections]
         mean_conf = float(top_scores.mean().item())
         return 1.0 - mean_conf
 
