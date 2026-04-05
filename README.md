@@ -1,56 +1,58 @@
 # stream-active-FL
 
-Buffer-based streaming active learning for object detection on ZOD Frames.
+Buffer-based streaming active learning for object detection, with federated
+learning simulation. Compares active filtering strategies (distribution,
+uncertainty, gradient-norm, random) against accept-all baselines in both
+centralized streaming and federated settings, using ZOD Frames.
 
-## Quick Start
+## Setup
 
 ```bash
-# 1. Install
 pip install -e .
+```
 
-# 2. Preprocess ZOD Frames (crop + resize + extract annotations)
-python tools/preprocessing/prepare_data.py \
-    --zod-root /path/to/zod \
-    --version full
+## Data Preprocessing
 
-# 3. Run an experiment
+```bash
+# Crop + resize ZOD frames and extract annotations
+python tools/preprocessing/prepare_data.py --zod-root /path/to/zod --version full
+
+# Build train/val manifests
+python tools/preprocessing/build_manifests.py
+```
+
+If your data lives outside the repo, set these environment variables:
+
+```bash
+export STREAM_ACTIVE_FL_DATA_ROOT=/path/to/data
+export STREAM_ACTIVE_FL_ZOD_ROOT=/path/to/data/ZOD_clone_2018_scaleout_zenseact
+export STREAM_ACTIVE_FL_PREPROCESSED_ROOT=/path/to/data/ZOD_frames_preprocessed
+```
+
+## Running Experiments
+
+```bash
+# Offline baseline (performance ceiling)
+python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+
+# Streaming detection (bootstrap + online filtering)
+python experiments/streaming_detection.py --config configs/streaming_distribution_filter.yaml
+
+# Federated streaming (FedAvg over client-local streaming)
+python experiments/federated_detection.py --config configs/federated_no_filter.yaml
+```
+
+Streaming and federated experiments can reuse a previous bootstrap to save time:
+
+```bash
 python experiments/streaming_detection.py \
-    --config configs/streaming_no_filter.yaml
-```
-
-## Experiments
-
-### Offline baseline
-
-Multi-epoch shuffled training on the full dataset:
-
-```bash
-python experiments/offline_baseline.py \
-    --config configs/offline_baseline.yaml
-```
-
-### Streaming (single-machine)
-
-Two-phase streaming experiment (bootstrap + online filtering):
-
-```bash
-python experiments/streaming_detection.py \
-    --config configs/streaming_distribution_filter.yaml
-```
-
-### Federated streaming (simulated FL)
-
-Server-side FedAvg over client-local streaming updates:
-
-```bash
-python experiments/federated_detection.py \
-    --config configs/federated_no_filter.yaml
-```
-
-You can reuse a shared bootstrap from any previous streaming run:
-
-```bash
-python experiments/federated_detection.py \
-    --config configs/federated_no_filter.yaml \
+    --config configs/streaming_uncertainty_filter.yaml \
     --bootstrap-run-dir outputs/streaming/no_filter/<run_id>
 ```
+
+See `configs/` for the full set of experiment configurations.
+
+## Output
+
+Each run writes to `outputs/<pipeline>/<variant>/<timestamp>/` with config
+snapshots, model checkpoints, per-epoch/checkpoint CSVs, and run metadata.
