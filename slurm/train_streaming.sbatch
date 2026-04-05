@@ -3,6 +3,7 @@
 #SBATCH -p gpu
 #SBATCH -q default
 #SBATCH -N 1
+#SBATCH --cpus-per-task=32
 #SBATCH -t 24:00:00
 #SBATCH --job-name=stream_det
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/stream_det_%j.out
@@ -14,10 +15,6 @@ module --force purge
 module load env/staging/2023.1
 module load PyTorch-bundle/2.1.2-foss-2023a-CUDA-12.1.1
 
-unset PYTHONPATH
-unset PYTHONHOME
-export PYTHONNOUSERSITE=1
-
 cd ~/stream-active-FL
 source .venv/bin/activate
 
@@ -26,14 +23,21 @@ export STREAM_ACTIVE_FL_ZOD_ROOT=/project/home/p201222/data/ZOD_clone_2018_scale
 export STREAM_ACTIVE_FL_PREPROCESSED_ROOT=/project/home/p201222/data/ZOD_frames_preprocessed
 
 mkdir -p "$STREAM_ACTIVE_FL_PREPROCESSED_ROOT/logs"
+python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__version__}  cuda={torch.cuda.is_available()}')"
 
-# Optional: pass BOOTSTRAP_RUN_DIR at submit time to skip bootstrap:
-#   sbatch --export=ALL,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter/<run_id> slurm/train_streaming.sbatch
+# Pass CONFIG_FILE at submit time to select experiment:
+#   sbatch --export=ALL,CONFIG_FILE=configs/streaming_distribution_filter.yaml slurm/train_streaming.sbatch
+# Optional: also pass BOOTSTRAP_RUN_DIR to skip bootstrap:
+#   sbatch --export=ALL,CONFIG_FILE=configs/streaming_distribution_filter.yaml,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter/<run_id> slurm/train_streaming.sbatch
+CONFIG_FILE="${CONFIG_FILE:-configs/streaming_no_filter.yaml}"
+echo "Config: $CONFIG_FILE"
+
 if [[ -n "${BOOTSTRAP_RUN_DIR:-}" ]]; then
-  srun python experiments/streaming_detection.py \
-    --config configs/streaming_no_filter.yaml \
+  echo "Reusing bootstrap: $BOOTSTRAP_RUN_DIR"
+  python experiments/streaming_detection.py \
+    --config "$CONFIG_FILE" \
     --bootstrap-run-dir "$BOOTSTRAP_RUN_DIR"
 else
-  srun python experiments/streaming_detection.py \
-    --config configs/streaming_no_filter.yaml
+  python experiments/streaming_detection.py \
+    --config "$CONFIG_FILE"
 fi

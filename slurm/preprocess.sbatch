@@ -3,6 +3,7 @@
 #SBATCH -p gpu
 #SBATCH -q default
 #SBATCH -N 1
+#SBATCH --cpus-per-task=32
 #SBATCH -t 08:00:00
 #SBATCH --job-name=prep_zod
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/prep_zod_%j.out

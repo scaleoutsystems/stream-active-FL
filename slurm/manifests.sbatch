@@ -3,6 +3,7 @@
 #SBATCH -p gpu
 #SBATCH -q default
 #SBATCH -N 1
+#SBATCH --cpus-per-task=32
 #SBATCH -t 01:00:00
 #SBATCH --job-name=build_manifests
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/build_manifests_%j.out
