@@ -16,6 +16,7 @@ import argparse
 import csv
 import shutil
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +48,7 @@ from stream_active_fl.experiment import (
 )
 from stream_active_fl.logging import (
     FederatedMetricsLogger,
+    log_gpu_memory,
     save_run_info,
 )
 from stream_active_fl.memory import TrainingBuffer
@@ -125,6 +127,9 @@ class FederatedDetectionConfig:
     bootstrap_smoke_min_map50: float = 0.005
     bootstrap_fail_on_smoke_check: bool = True
 
+    # Performance
+    use_amp: bool = True
+
     # DataLoader
     num_workers: int = 2
 
@@ -145,6 +150,7 @@ def _bootstrap_or_reuse(
     val_transform,
     train_augmentation,
     device: torch.device,
+    scaler: torch.cuda.amp.GradScaler,
 ) -> tuple[nn.Module, Optional[torch.Tensor], Optional[torch.Tensor], int, Optional[Path]]:
     requires_bootstrap_embeddings = (config.filter_policy == "distribution")
     bootstrap_source: Optional[Path] = None
@@ -242,6 +248,7 @@ def _bootstrap_or_reuse(
         device=device,
         epochs=config.bootstrap_epochs,
         max_grad_norm=config.max_grad_norm,
+        scaler=scaler,
     )
     final_loss = epoch_logs[-1]["avg_loss"] if epoch_logs else float("nan")
     print(f"Bootstrap complete: final_loss={final_loss:.4f}, steps={total_steps}")
@@ -265,6 +272,7 @@ def _bootstrap_or_reuse(
         smoke_stream,
         device,
         score_threshold=config.bootstrap_smoke_score_threshold,
+        use_amp=config.use_amp,
     )
     print(
         "Smoke-check:"
@@ -317,6 +325,10 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    scaler = torch.cuda.amp.GradScaler(enabled=config.use_amp)
+    if config.use_amp:
+        print("AMP: enabled (mixed-precision training)")
+
     manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
     run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
     print(f"Run directory: {run_dir}")
@@ -334,6 +346,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             color_jitter=config.color_jitter,
         )
 
+    bootstrap_start = time.time()
     global_model, embedding_mean, embedding_cov, embedding_count, bootstrap_source = _bootstrap_or_reuse(
         config=config,
         run_dir=run_dir,
@@ -342,7 +355,11 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         val_transform=val_transform,
         train_augmentation=train_augmentation,
         device=device,
+        scaler=scaler,
     )
+    bootstrap_duration = time.time() - bootstrap_start
+    print(f"\nBootstrap phase completed in {bootstrap_duration:.1f}s")
+    log_gpu_memory()
 
     # Shared val stream for server-side evaluation
     val_stream = DetectionStream(
@@ -470,6 +487,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 novelty_tracker=None,
                 progress_bar=False,
                 total_items=len(client_stream),
+                scaler=scaler,
             )
 
             accepted_items = int(result.items_accepted)
@@ -506,6 +524,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 val_stream,
                 device,
                 score_threshold=config.score_threshold,
+                use_amp=config.use_amp,
             )
             final_metrics = eval_metrics
             print(
@@ -527,6 +546,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             val_stream,
             device,
             score_threshold=config.score_threshold,
+            use_amp=config.use_amp,
         )
 
     print("\n" + "=" * 60)

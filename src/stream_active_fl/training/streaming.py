@@ -55,6 +55,7 @@ def bootstrap_train(
     max_grad_norm: float = 0.0,
     progress_bar: bool = True,
     desc_prefix: str = "Bootstrap",
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> Tuple[List[Dict[str, float]], int]:
     """
     Multi-epoch training on bootstrap frames (standard supervised detection).
@@ -65,6 +66,8 @@ def bootstrap_train(
     Args:
         desc_prefix: Label shown in the tqdm progress bar (e.g. "Epoch" for
             offline training, "Bootstrap" for streaming bootstrap phase).
+        scaler: Optional GradScaler for AMP mixed-precision training.
+            When provided, forward passes run under torch.cuda.amp.autocast.
 
     Returns:
         (epoch_logs, total_steps): Per-epoch metrics and total optimizer steps.
@@ -73,6 +76,7 @@ def bootstrap_train(
     model.train()
     total_steps = 0
     epoch_logs: List[Dict[str, float]] = []
+    use_amp = scaler is not None and scaler.is_enabled()
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -93,17 +97,31 @@ def bootstrap_train(
             ]
 
             optimizer.zero_grad()
-            loss_dict = model(images, targets)
-            loss = torch.stack(list(loss_dict.values())).sum()
-            loss.backward()
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                loss_dict = model(images, targets)
+                loss = torch.stack(list(loss_dict.values())).sum()
 
-            if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad],
-                    max_grad_norm,
-                )
+            if scaler is not None:
+                scaled_loss = scaler.scale(loss)
+                assert isinstance(scaled_loss, torch.Tensor)
+                scaled_loss.backward()
+                if max_grad_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        max_grad_norm,
+                    )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        max_grad_norm,
+                    )
+                optimizer.step()
 
-            optimizer.step()
             total_steps += 1
             running_loss += loss.item()
             n_batches += 1
@@ -142,6 +160,9 @@ def collect_embeddings(
         (mean, cov, count): Mean vector (D,), covariance matrix (D, D),
         and number of embeddings used.
     """
+    was_training = model.training
+    model.eval()
+
     all_embeddings: List[torch.Tensor] = []
 
     loader = tqdm(data_loader, desc="Collecting embeddings") if progress_bar else data_loader
@@ -153,6 +174,9 @@ def collect_embeddings(
         images = [img.to(device) for img in images]
         emb = model.get_embedding(images)  # (B, D)
         all_embeddings.append(emb.cpu())
+
+    if was_training:
+        model.train()
 
     embeddings = torch.cat(all_embeddings, dim=0)  # (N, D)
 
@@ -188,6 +212,7 @@ def train_on_stream(
     novelty_tracker: Optional[Any] = None,
     progress_bar: bool = True,
     total_items: Optional[int] = None,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> StreamingTrainResult:
     """
     Single-pass buffer-based streaming training.
@@ -240,28 +265,49 @@ def train_on_stream(
     optimizer_steps = 0
     checkpoint_idx = 0
 
+    use_amp = scaler is not None and scaler.is_enabled()
+
+    running_train_loss = 0.0
+    train_loss_steps = 0
+
     def _optimizer_step(
         images: List[torch.Tensor],
         targets: List[Dict[str, torch.Tensor]],
     ) -> None:
-        nonlocal optimizer_steps
+        nonlocal optimizer_steps, running_train_loss, train_loss_steps
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         model.train()
 
         optimizer.zero_grad()
-        loss_dict = model(images, targets)
-        loss = torch.stack(list(loss_dict.values())).sum()
-        loss.backward()
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            loss_dict = model(images, targets)
+            loss = torch.stack(list(loss_dict.values())).sum()
 
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                max_grad_norm,
-            )
+        if scaler is not None:
+            scaled_loss = scaler.scale(loss)
+            assert isinstance(scaled_loss, torch.Tensor)
+            scaled_loss.backward()
+            if max_grad_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    max_grad_norm,
+                )
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    max_grad_norm,
+                )
+            optimizer.step()
 
-        optimizer.step()
         optimizer_steps += 1
+        running_train_loss += loss.item()
+        train_loss_steps += 1
 
     def _train_on_current_buffer() -> None:
         if buffer_training_mode == "full_batch":
@@ -343,13 +389,17 @@ def train_on_stream(
             filter_stats = filter_policy.get_stats()
             buffer_stats = training_buffer.get_stats()
             novelty_stats = novelty_tracker.get_stats() if novelty_tracker else None
+            checkpoint_loss = (running_train_loss / train_loss_steps) if train_loss_steps > 0 else None
             metrics_logger.log_checkpoint(
                 checkpoint_idx,
                 optimizer_steps,
                 filter_stats,
                 buffer_stats,
                 novelty_stats,
+                avg_train_loss=checkpoint_loss,
             )
+            running_train_loss = 0.0
+            train_loss_steps = 0
 
             selection_stats = filter_policy.get_selection_stats()
             metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)

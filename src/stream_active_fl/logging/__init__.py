@@ -12,6 +12,7 @@ from .federated_logger import FederatedMetricsLogger
 from .run_tracker import (
     get_environment_info,
     get_git_info,
+    log_gpu_memory,
     save_run_info,
 )
 from .streaming_logger import StreamingMetricsLogger
@@ -22,5 +23,6 @@ __all__ = [
     "create_run_dir",
     "get_environment_info",
     "get_git_info",
+    "log_gpu_memory",
     "save_run_info",
 ]

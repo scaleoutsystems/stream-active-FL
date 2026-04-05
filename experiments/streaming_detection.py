@@ -23,6 +23,7 @@ import argparse
 import csv
 import shutil
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,7 +53,7 @@ from stream_active_fl.experiment import (
     resolve_manifest_path,
     setup_run_dir,
 )
-from stream_active_fl.logging import StreamingMetricsLogger, save_run_info
+from stream_active_fl.logging import StreamingMetricsLogger, log_gpu_memory, save_run_info
 from stream_active_fl.memory import TrainingBuffer
 from stream_active_fl.policies import create_filter_policy
 from stream_active_fl.training import bootstrap_train, collect_embeddings, train_on_stream
@@ -75,7 +76,7 @@ class StreamingDetectionConfig:
     # Model / classes
     num_classes: int = 11
     target_classes: Optional[List[str]] = None
-    trainable_backbone_layers: int = 0
+    trainable_backbone_layers: int = 3
     image_min_size: int = 480
     image_max_size: int = 1600
     pretrained_backbone: bool = True
@@ -134,6 +135,9 @@ class StreamingDetectionConfig:
     bootstrap_smoke_min_map50: float = 0.005
     bootstrap_fail_on_smoke_check: bool = True
 
+    # Performance
+    use_amp: bool = True
+
     # DataLoader
     num_workers: int = 2
 
@@ -161,6 +165,10 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     set_seed(config.seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    scaler = torch.cuda.amp.GradScaler(enabled=config.use_amp)
+    if config.use_amp:
+        print("AMP: enabled (mixed-precision training)")
 
     manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
     run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
@@ -194,6 +202,8 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     if config.bootstrap_run_dir:
         p = Path(config.bootstrap_run_dir)
         bootstrap_source = p if p.is_absolute() else PROJECT_ROOT / p
+
+    bootstrap_start = time.time()
 
     if bootstrap_source is not None:
         # ----- Reuse bootstrap from a previous run -----
@@ -304,6 +314,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             device=device,
             epochs=config.bootstrap_epochs,
             max_grad_norm=config.max_grad_norm,
+            scaler=scaler,
         )
         final_loss = epoch_logs[-1]["avg_loss"] if epoch_logs else float("nan")
         print(f"Bootstrap complete: final_loss={final_loss:.4f}, steps={total_steps}")
@@ -328,6 +339,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             smoke_val_stream,
             device,
             score_threshold=config.bootstrap_smoke_score_threshold,
+            use_amp=config.use_amp,
         )
         print(
             "Smoke-check:"
@@ -348,7 +360,6 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                 "Increase bootstrap strength or adjust detector initialization."
             )
 
-        # Save bootstrap checkpoint
         torch.save(
             {"model_state_dict": model.state_dict()},
             run_dir / "bootstrap_model.pt",
@@ -380,6 +391,10 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     # =========================================================================
     # Phase 2: Streaming
     # =========================================================================
+
+    bootstrap_duration = time.time() - bootstrap_start
+    print(f"\nBootstrap phase completed in {bootstrap_duration:.1f}s")
+    log_gpu_memory()
 
     print("\n" + "=" * 60)
     print("Phase 2: Streaming Training")
@@ -440,7 +455,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     eval_interval = max(1, config.eval_every_n_items // config.checkpoint_interval)
 
     def eval_fn(m: nn.Module) -> dict:
-        return evaluate_detection(m, val_stream, device, score_threshold=config.score_threshold)
+        return evaluate_detection(m, val_stream, device, score_threshold=config.score_threshold, use_amp=config.use_amp)
 
     # Save run info
     dataset_info = {
@@ -481,6 +496,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         eval_every_n_checkpoints=eval_interval,
         novelty_tracker=novelty_tracker,
         total_items=len(train_stream),
+        scaler=scaler,
     )
 
     print("\n" + "=" * 60)
@@ -498,7 +514,8 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     # Final evaluation
     print("\nFinal evaluation...")
     final_metrics = evaluate_detection(
-        model, val_stream, device, score_threshold=config.score_threshold
+        model, val_stream, device, score_threshold=config.score_threshold,
+        use_amp=config.use_amp,
     )
     print(f"  mAP:    {final_metrics['mAP']:.4f}")
     print(f"  mAP@50: {final_metrics.get('mAP_50', 0.0):.4f}")
@@ -506,7 +523,6 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
 
     metrics_logger.print_summary()
 
-    # Save final model
     torch.save(
         {
             "model_state_dict": model.state_dict(),

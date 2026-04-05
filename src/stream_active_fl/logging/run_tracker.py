@@ -129,3 +129,12 @@ def save_run_info(
 
     with open(run_dir / "run_info.json", "w") as f:
         json.dump(run_info, f, indent=2)
+
+
+def log_gpu_memory() -> None:
+    """Print peak GPU memory usage and reset the counter."""
+    if torch.cuda.is_available():
+        peak_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        current_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+        print(f"GPU memory: {current_mb:.0f} MB current, {peak_mb:.0f} MB peak")
+        torch.cuda.reset_peak_memory_stats()

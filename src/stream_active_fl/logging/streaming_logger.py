@@ -92,6 +92,7 @@ class StreamingMetricsLogger:
                 "empty_total",
                 "empty_accepted",
                 "empty_rejected",
+                "avg_train_loss",
             ])
 
         with open(self.checkpoints_file, "w", newline="") as f:
@@ -178,6 +179,7 @@ class StreamingMetricsLogger:
         filter_stats: Optional[Dict[str, Any]] = None,
         buffer_stats: Optional[Dict[str, Any]] = None,
         novelty_stats: Optional[Dict[str, Any]] = None,
+        avg_train_loss: Optional[float] = None,
     ) -> None:
         """Log a checkpoint (periodic snapshot of metrics)."""
         elapsed = time.time() - self.start_time
@@ -220,6 +222,7 @@ class StreamingMetricsLogger:
                 empty_total,
                 empty_accepted,
                 empty_rejected,
+                f"{avg_train_loss:.6f}" if avg_train_loss is not None else "",
             ])
 
     def log_filter_stats(

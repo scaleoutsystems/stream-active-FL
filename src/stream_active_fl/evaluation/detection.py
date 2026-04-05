@@ -39,6 +39,7 @@ def evaluate_detection(
     score_threshold: float = 0.3,
     iou_thresholds: Sequence[float] = COCO_IOU_THRESHOLDS,
     class_mapping: Optional[ClassMapping] = None,
+    use_amp: bool = False,
 ) -> Dict[str, float]:
     """
     Evaluate detection model on a validation stream with COCO-style metrics.
@@ -52,6 +53,7 @@ def evaluate_detection(
         class_mapping: Optional ClassMapping for per-class AP reporting.
             When None, uses the stream's class_mapping if available,
             otherwise falls back to all ZOD classes.
+        use_amp: Run forward passes under torch.cuda.amp.autocast.
 
     Returns:
         Dict with mAP, mAP_50, mAP_75, per-class APs, and counts.
@@ -69,7 +71,8 @@ def evaluate_detection(
     with torch.no_grad():
         for stream_item in val_stream:
             image = stream_item.image.to(device)
-            predictions = model([image])
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                predictions = model([image])
             pred = predictions[0]
 
             keep = pred["scores"] >= score_threshold

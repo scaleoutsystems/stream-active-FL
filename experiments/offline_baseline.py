@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,7 +43,7 @@ from stream_active_fl.experiment import (
     resolve_manifest_path,
     setup_run_dir,
 )
-from stream_active_fl.logging import save_run_info
+from stream_active_fl.logging import log_gpu_memory, save_run_info
 from stream_active_fl.training import bootstrap_train
 from stream_active_fl.utils import set_seed, worker_init_fn
 
@@ -85,6 +86,9 @@ class OfflineBaselineConfig:
     hflip_prob: float = 0.5
     color_jitter: bool = True
 
+    # Performance
+    use_amp: bool = True
+
     # Evaluation
     eval_every_n_epochs: int = 1
     score_threshold: float = 0.3
@@ -120,6 +124,8 @@ class EpochLogger:
             "epoch",
             "train_loss",
             "lr",
+            "epoch_seconds",
+            "cumulative_seconds",
             "mAP",
             "mAP_50",
             "mAP_75",
@@ -132,12 +138,14 @@ class EpochLogger:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
             writer.writeheader()
 
-    def log(self, epoch: int, train_loss: float, eval_metrics: Optional[dict] = None, lr: Optional[float] = None) -> None:
+    def log(self, epoch: int, train_loss: float, eval_metrics: Optional[dict] = None, lr: Optional[float] = None, epoch_seconds: float = 0.0, cumulative_seconds: float = 0.0) -> None:
         row = {k: "" for k in self.fieldnames}
         row["epoch"] = str(epoch)
         row["train_loss"] = f"{train_loss:.6f}"
         if lr is not None:
             row["lr"] = f"{lr:.2e}"
+        row["epoch_seconds"] = f"{epoch_seconds:.1f}"
+        row["cumulative_seconds"] = f"{cumulative_seconds:.1f}"
         if eval_metrics:
             for k, v in eval_metrics.items():
                 if k in row:
@@ -238,6 +246,10 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         print(f"LR scheduler: cosine (warmup={config.lr_warmup_epochs}, "
               f"T_max={main_epochs}, eta_min={config.lr * 0.01:.1e})")
 
+    scaler = torch.cuda.amp.GradScaler(enabled=config.use_amp)
+    if config.use_amp:
+        print("AMP: enabled (mixed-precision training)")
+
     epoch_logger = EpochLogger(run_dir, class_names=list(class_mapping.names))
     best_mAP = 0.0
     best_epoch = 0
@@ -249,7 +261,11 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     print(f"\nTraining: {len(train_dataset)} frames, {config.epochs} epochs")
     print(f"Val set:  {len(val_stream)} frames")
 
+    training_start_time = time.time()
+
     for epoch in range(1, config.epochs + 1):
+        epoch_start_time = time.time()
+
         # Linear LR warmup
         if epoch <= config.lr_warmup_epochs:
             warmup_factor = epoch / max(config.lr_warmup_epochs, 1)
@@ -265,8 +281,12 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             max_grad_norm=config.max_grad_norm,
             progress_bar=True,
             desc_prefix=f"Train {epoch}/{config.epochs}",
+            scaler=scaler,
         )
         epoch_loss = epoch_logs[0]["avg_loss"] if epoch_logs else float("nan")
+
+        if epoch == 1:
+            log_gpu_memory()
 
         # Step scheduler after warmup
         if scheduler is not None and epoch > config.lr_warmup_epochs:
@@ -281,6 +301,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             print(f"\nEvaluating after epoch {epoch}...")
             eval_metrics = evaluate_detection(
                 model, val_stream, device, score_threshold=config.score_threshold,
+                use_amp=config.use_amp,
             )
             mAP = eval_metrics["mAP"]
             print(f"  mAP: {mAP:.4f}  mAP@50: {eval_metrics.get('mAP_50', 0.0):.4f}  mAP@75: {eval_metrics.get('mAP_75', 0.0):.4f}")
@@ -300,6 +321,7 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
                     smoke_stream,
                     device,
                     score_threshold=config.bootstrap_smoke_score_threshold,
+                    use_amp=config.use_amp,
                 )
                 print(
                     "Smoke-check:"
@@ -328,7 +350,10 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
                     run_dir / "best_model.pt",
                 )
 
-        epoch_logger.log(epoch, epoch_loss, eval_metrics, lr=current_lr)
+        epoch_seconds = time.time() - epoch_start_time
+        cumulative_seconds = time.time() - training_start_time
+        epoch_logger.log(epoch, epoch_loss, eval_metrics, lr=current_lr,
+                         epoch_seconds=epoch_seconds, cumulative_seconds=cumulative_seconds)
 
     # =========================================================================
     # Final summary
@@ -339,7 +364,6 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     print(f"  Best mAP: {best_mAP:.4f} (epoch {best_epoch})")
     print("=" * 60)
 
-    # Save final model
     torch.save(
         {
             "model_state_dict": model.state_dict(),
