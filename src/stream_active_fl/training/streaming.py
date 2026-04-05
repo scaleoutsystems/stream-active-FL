@@ -82,7 +82,11 @@ def bootstrap_train(
         running_loss = 0.0
         n_batches = 0
 
-        pbar = tqdm(train_loader, desc=f"{desc_prefix} epoch {epoch + 1}/{epochs}") if progress_bar else None
+        if epochs > 1:
+            desc = f"{desc_prefix} epoch {epoch + 1}/{epochs}"
+        else:
+            desc = desc_prefix
+        pbar = tqdm(train_loader, desc=desc) if progress_bar else None
         loader: Iterable = pbar if pbar is not None else train_loader
 
         for batch in loader:
