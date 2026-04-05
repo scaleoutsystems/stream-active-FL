@@ -50,6 +50,9 @@ bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005
 bootstrap_fail_on_smoke_check: true
 
+# DataLoader
+num_workers: 8
+
 # Reproducibility
 seed: 42
 device: "cuda"

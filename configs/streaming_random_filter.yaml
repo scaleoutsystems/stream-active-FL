@@ -28,8 +28,8 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 buffer_capacity: 16
 train_steps_per_buffer: 1
-buffer_training_mode: "full_batch"  # "full_batch" or "mini_batch"
-local_epochs_per_buffer: 1
+buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
+local_epochs_per_buffer: 3
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
@@ -51,6 +51,9 @@ bootstrap_smoke_check_frames: 200
 bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005
 bootstrap_fail_on_smoke_check: true
+
+# DataLoader
+num_workers: 8
 
 # Reproducibility
 seed: 42
