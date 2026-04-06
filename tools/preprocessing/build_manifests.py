@@ -67,7 +67,7 @@ def load_manifest(path: Path) -> Dict[str, Any]:
 
 
 def save_manifest(path: Path, manifest: Dict[str, Any]) -> None:
-    """Write a manifest dict to *path* as pretty-printed JSON."""
+    """Write a manifest dict to path as pretty-printed JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
         json.dump(manifest, f, indent=2)
