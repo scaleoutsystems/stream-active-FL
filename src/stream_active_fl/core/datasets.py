@@ -412,11 +412,14 @@ class DetectionDataset(Dataset):
 
 class DetectionStream:
     """
-    Streaming dataset that yields frames in strict chronological order.
+    Streaming dataset that yields frames in manifest order (single pass).
 
     Unlike DetectionDataset which supports shuffled DataLoader access,
     this class is an iterator that produces one StreamItem at a time in the
-    order they appear in the manifest (sorted by frame_id / timestamp).
+    order frames are listed for the chosen split.  The base manifest from
+    preprocessing lists frames sorted by frame_id; ``manifest_temporal.json``
+    (from ``build_manifests.py``) reorders the training split by capture
+    timestamp, which is what streaming experiment configs use by default.
 
     Args:
         manifest_path: Path to the preprocessing manifest JSON.
@@ -449,6 +452,7 @@ class DetectionStream:
         self.class_mapping = build_class_mapping(target_classes)
 
         manifest = load_manifest(self.manifest_path)
+        self._manifest_ordering = manifest.get("ordering")
         all_frames = manifest["frames"]
 
         split_frames = [f for f in all_frames if f["split"] == split]
@@ -476,7 +480,11 @@ class DetectionStream:
         print(f"  Classes ({len(self.class_mapping.names)}): {classes_str}")
         print(f"  Total frames : {total}")
         print(f"  With objects : {with_objects} ({100 * with_objects / max(total, 1):.1f}%)")
-        print(f"  Stream order : chronological (by frame_id)")
+        if self._manifest_ordering:
+            strat = self._manifest_ordering.get("strategy", "custom")
+            print(f"  Stream order : manifest ordering ({strat})")
+        else:
+            print("  Stream order : as listed in manifest (preprocessing default: frame_id)")
         print("=" * 60)
         print()
 

@@ -3,7 +3,8 @@
 #SBATCH -p gpu
 #SBATCH -q short
 #SBATCH -N 1
-#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
 #SBATCH -t 00:15:00
 #SBATCH --job-name=tests
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/tests_%j.out

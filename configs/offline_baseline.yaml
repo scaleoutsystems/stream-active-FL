@@ -6,7 +6,7 @@ output_dir: "outputs/offline/baseline"
 
 # Model / classes
 num_classes: 11
-target_classes: null  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -22,7 +22,7 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 num_workers: 8
 lr_scheduler: "cosine"
-lr_warmup_epochs: 1
+lr_warmup_epochs: 3
 
 # Augmentation
 augment: true

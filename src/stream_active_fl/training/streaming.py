@@ -135,7 +135,10 @@ def bootstrap_train(
 
         avg_loss = running_loss / max(n_batches, 1)
         epoch_logs.append({"epoch": epoch + 1, "avg_loss": avg_loss, "batches": n_batches})
-        print(f"  Epoch {epoch + 1}/{epochs} — avg loss: {avg_loss:.4f}")
+        if epochs > 1:
+            print(f"  Epoch {epoch + 1}/{epochs} — avg loss: {avg_loss:.4f}")
+        else:
+            print(f"  {desc_prefix} — avg loss: {avg_loss:.4f}")
 
     return epoch_logs, total_steps
 

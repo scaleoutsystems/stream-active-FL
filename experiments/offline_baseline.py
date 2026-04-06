@@ -5,14 +5,16 @@ Establishes the performance ceiling for comparison with streaming experiments.
 Trains a detection model on all training frames for multiple epochs using a
 standard DataLoader with shuffle, then evaluates on the validation set.
 
-Usage:
+Supports single-GPU and multi-GPU (DDP) training:
     python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+    torchrun --nproc_per_node=4 experiments/offline_baseline.py --config configs/offline_baseline.yaml
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 import warnings
@@ -22,6 +24,9 @@ from pathlib import Path
 from typing import List, Literal, Optional
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 warnings.filterwarnings("ignore", message="Can't initialize NVML")
 
@@ -164,22 +169,46 @@ class EpochLogger:
 def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None:
     start_time = datetime.now()
 
-    print("=" * 60)
-    print("Offline Baseline")
-    print("=" * 60)
+    # Distributed setup — auto-detected via torchrun env vars
+    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if distributed:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        local_rank = 0
+        rank = 0
+        world_size = 1
+        device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
+    is_main = rank == 0
+
+    if is_main:
+        print("=" * 60)
+        print("Offline Baseline")
+        print("=" * 60)
+
+    # Same seed on all ranks for identical model initialization
     set_seed(config.seed)
-    device = torch.device(config.device if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+
+    if is_main:
+        if distributed:
+            print(f"DDP: {world_size} GPUs, rank {rank}")
+        print(f"Device: {device}")
 
     manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
-    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
-    print(f"Run directory: {run_dir}")
+    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path) if is_main else Path("/tmp")
+    if is_main:
+        print(f"Run directory: {run_dir}")
 
     class_mapping = build_class_mapping(config.target_classes)
     if config.target_classes is not None:
         config.num_classes = class_mapping.num_classes
-        print(f"Target classes ({len(class_mapping.names)}): {', '.join(class_mapping.names)}")
+        if is_main:
+            print(f"Target classes ({len(class_mapping.names)}): {', '.join(class_mapping.names)}")
 
     # Transforms + augmentation
     train_transform, val_transform = get_detection_transforms()
@@ -208,10 +237,13 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
         target_classes=config.target_classes,
     )
 
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=config.num_workers,
         collate_fn=detection_collate,
         worker_init_fn=worker_init_fn,
@@ -223,16 +255,28 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
 
     if config.load_checkpoint:
         checkpoint_path = PROJECT_ROOT / config.load_checkpoint
-        print(f"Loading checkpoint: {checkpoint_path}")
+        if is_main:
+            print(f"Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
 
     model = model.to(device)
-    print(model)
+    if distributed:
+        model = DDP(model, device_ids=[local_rank])
+        # Diverge RNG per rank so each gets different augmentations
+        set_seed(config.seed + rank)
+
+    if is_main:
+        raw_model = model.module if distributed else model
+        print(raw_model)
+
+    # Adam already adapts to reduced gradient noise from larger effective batch,
+    # so no LR scaling is needed (unlike SGD where linear scaling is standard).
+    effective_lr = config.lr
 
     optimizer = torch.optim.Adam(
         [p for p in model.parameters() if p.requires_grad],
-        lr=config.lr,
+        lr=effective_lr,
         weight_decay=config.weight_decay,
     )
 
@@ -241,16 +285,20 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     if config.lr_scheduler == "cosine":
         main_epochs = max(config.epochs - config.lr_warmup_epochs, 1)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=main_epochs, eta_min=config.lr * 0.01,
+            optimizer, T_max=main_epochs, eta_min=effective_lr * 0.01,
         )
-        print(f"LR scheduler: cosine (warmup={config.lr_warmup_epochs}, "
-              f"T_max={main_epochs}, eta_min={config.lr * 0.01:.1e})")
+        if is_main:
+            print(f"LR scheduler: cosine (warmup={config.lr_warmup_epochs}, "
+                  f"T_max={main_epochs}, eta_min={effective_lr * 0.01:.1e})")
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.use_amp)
-    if config.use_amp:
-        print("AMP: enabled (mixed-precision training)")
+    if is_main:
+        if config.use_amp:
+            print("AMP: enabled (mixed-precision training)")
+        if distributed:
+            print(f"Effective batch size: {config.batch_size} x {world_size} = {config.batch_size * world_size}")
 
-    epoch_logger = EpochLogger(run_dir, class_names=list(class_mapping.names))
+    epoch_logger = EpochLogger(run_dir, class_names=list(class_mapping.names)) if is_main else None
     best_mAP = 0.0
     best_epoch = 0
 
@@ -258,19 +306,24 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
     # Training loop
     # =========================================================================
 
-    print(f"\nTraining: {len(train_dataset)} frames, {config.epochs} epochs")
-    print(f"Val set:  {len(val_stream)} frames")
+    if is_main:
+        print(f"\nTraining: {len(train_dataset)} frames, {config.epochs} epochs")
+        print(f"Val set:  {len(val_stream)} frames")
 
     training_start_time = time.time()
+    raw_model = model.module if distributed else model
 
     for epoch in range(1, config.epochs + 1):
         epoch_start_time = time.time()
+
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
 
         # Linear LR warmup
         if epoch <= config.lr_warmup_epochs:
             warmup_factor = epoch / max(config.lr_warmup_epochs, 1)
             for pg in optimizer.param_groups:
-                pg["lr"] = config.lr * warmup_factor
+                pg["lr"] = effective_lr * warmup_factor
 
         epoch_logs, _ = bootstrap_train(
             model=model,
@@ -279,13 +332,13 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             device=device,
             epochs=1,
             max_grad_norm=config.max_grad_norm,
-            progress_bar=True,
+            progress_bar=is_main,
             desc_prefix=f"Train {epoch}/{config.epochs}",
             scaler=scaler,
         )
         epoch_loss = epoch_logs[0]["avg_loss"] if epoch_logs else float("nan")
 
-        if epoch == 1:
+        if epoch == 1 and is_main:
             log_gpu_memory()
 
         # Step scheduler after warmup
@@ -293,104 +346,118 @@ def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None
             scheduler.step()
 
         current_lr = optimizer.param_groups[0]["lr"]
-        print(f"  LR: {current_lr:.2e}")
+        if is_main:
+            print(f"  LR: {current_lr:.2e}")
 
-        # Evaluate
+        # Evaluate (rank 0 only; other ranks wait at barrier)
         eval_metrics = None
-        if epoch % config.eval_every_n_epochs == 0 or epoch == config.epochs:
-            print(f"\nEvaluating after epoch {epoch}...")
-            eval_metrics = evaluate_detection(
-                model, val_stream, device, score_threshold=config.score_threshold,
-                use_amp=config.use_amp,
-            )
-            mAP = eval_metrics["mAP"]
-            print(f"  mAP: {mAP:.4f}  mAP@50: {eval_metrics.get('mAP_50', 0.0):.4f}  mAP@75: {eval_metrics.get('mAP_75', 0.0):.4f}")
-
-            if epoch == 1:
-                smoke_stream = DetectionStream(
-                    manifest_path=manifest_path,
-                    split="val",
-                    transform=val_transform,
-                    min_box_area=config.min_box_area,
-                    frame_range=(0, config.bootstrap_smoke_check_frames),
-                    target_classes=config.target_classes,
-                    verbose=False,
-                )
-                smoke_metrics = evaluate_detection(
-                    model,
-                    smoke_stream,
-                    device,
-                    score_threshold=config.bootstrap_smoke_score_threshold,
-                    use_amp=config.use_amp,
-                )
-                print(
-                    "Smoke-check:"
-                    f" mAP={smoke_metrics.get('mAP', 0.0):.4f},"
-                    f" mAP@50={smoke_metrics.get('mAP_50', 0.0):.4f},"
-                    f" preds={int(smoke_metrics.get('total_predictions', 0.0))},"
-                    f" gt={int(smoke_metrics.get('total_ground_truth', 0.0))},"
-                    f" items={int(smoke_metrics.get('num_items', 0.0))}"
-                )
-                if (
-                    config.bootstrap_fail_on_smoke_check
-                    and smoke_metrics.get("mAP_50", 0.0) < config.bootstrap_smoke_min_map50
-                ):
-                    raise RuntimeError(
-                        "Smoke-check failed after epoch 1: "
-                        f"mAP@50={smoke_metrics.get('mAP_50', 0.0):.4f} < "
-                        f"{config.bootstrap_smoke_min_map50:.4f}. "
-                        "Adjust initialization or training strength."
+        should_eval = epoch % config.eval_every_n_epochs == 0 or epoch == config.epochs
+        if should_eval:
+            try:
+                if is_main:
+                    print(f"\nEvaluating after epoch {epoch}...")
+                    eval_metrics = evaluate_detection(
+                        raw_model, val_stream, device,
+                        score_threshold=config.score_threshold,
+                        use_amp=config.use_amp,
                     )
+                    mAP = eval_metrics["mAP"]
+                    print(f"  mAP: {mAP:.4f}  mAP@50: {eval_metrics.get('mAP_50', 0.0):.4f}  mAP@75: {eval_metrics.get('mAP_75', 0.0):.4f}")
 
-            if mAP > best_mAP:
-                best_mAP = mAP
-                best_epoch = epoch
-                torch.save(
-                    {"model_state_dict": model.state_dict(), "epoch": epoch, "mAP": mAP},
-                    run_dir / "best_model.pt",
-                )
+                    if epoch == 1:
+                        smoke_stream = DetectionStream(
+                            manifest_path=manifest_path,
+                            split="val",
+                            transform=val_transform,
+                            min_box_area=config.min_box_area,
+                            frame_range=(0, config.bootstrap_smoke_check_frames),
+                            target_classes=config.target_classes,
+                            verbose=False,
+                        )
+                        smoke_metrics = evaluate_detection(
+                            raw_model,
+                            smoke_stream,
+                            device,
+                            score_threshold=config.bootstrap_smoke_score_threshold,
+                            use_amp=config.use_amp,
+                        )
+                        print(
+                            "Smoke-check:"
+                            f" mAP={smoke_metrics.get('mAP', 0.0):.4f},"
+                            f" mAP@50={smoke_metrics.get('mAP_50', 0.0):.4f},"
+                            f" preds={int(smoke_metrics.get('total_predictions', 0.0))},"
+                            f" gt={int(smoke_metrics.get('total_ground_truth', 0.0))},"
+                            f" items={int(smoke_metrics.get('num_items', 0.0))}"
+                        )
+                        if (
+                            config.bootstrap_fail_on_smoke_check
+                            and smoke_metrics.get("mAP_50", 0.0) < config.bootstrap_smoke_min_map50
+                        ):
+                            raise RuntimeError(
+                                "Smoke-check failed after epoch 1: "
+                                f"mAP@50={smoke_metrics.get('mAP_50', 0.0):.4f} < "
+                                f"{config.bootstrap_smoke_min_map50:.4f}. "
+                                "Adjust initialization or training strength."
+                            )
+
+                    if mAP > best_mAP:
+                        best_mAP = mAP
+                        best_epoch = epoch
+                        torch.save(
+                            {"model_state_dict": raw_model.state_dict(), "epoch": epoch, "mAP": mAP},
+                            run_dir / "best_model.pt",
+                        )
+            finally:
+                if distributed:
+                    dist.barrier()
 
         epoch_seconds = time.time() - epoch_start_time
         cumulative_seconds = time.time() - training_start_time
-        epoch_logger.log(epoch, epoch_loss, eval_metrics, lr=current_lr,
-                         epoch_seconds=epoch_seconds, cumulative_seconds=cumulative_seconds)
+        if epoch_logger is not None:
+            epoch_logger.log(epoch, epoch_loss, eval_metrics, lr=current_lr,
+                             epoch_seconds=epoch_seconds, cumulative_seconds=cumulative_seconds)
 
     # =========================================================================
     # Final summary
     # =========================================================================
 
-    print("\n" + "=" * 60)
-    print("Offline Baseline Complete")
-    print(f"  Best mAP: {best_mAP:.4f} (epoch {best_epoch})")
-    print("=" * 60)
+    if is_main:
+        print("\n" + "=" * 60)
+        print("Offline Baseline Complete")
+        print(f"  Best mAP: {best_mAP:.4f} (epoch {best_epoch})")
+        print("=" * 60)
 
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "config": config.__dict__,
-            "best_mAP": best_mAP,
-            "best_epoch": best_epoch,
-        },
-        run_dir / "final_model.pt",
-    )
+        torch.save(
+            {
+                "model_state_dict": raw_model.state_dict(),
+                "config": config.__dict__,
+                "best_mAP": best_mAP,
+                "best_epoch": best_epoch,
+            },
+            run_dir / "final_model.pt",
+        )
 
-    save_run_info(
-        run_dir=run_dir,
-        config=config,
-        command=command,
-        start_time=start_time,
-        end_time=datetime.now(),
-        best_epoch=best_epoch,
-        best_metric=best_mAP,
-        best_metric_name="val_mAP",
-        dataset_info={
-            "train_frames": len(train_dataset),
-            "val_frames": len(val_stream),
-        },
-        repo_path=PROJECT_ROOT,
-    )
+        save_run_info(
+            run_dir=run_dir,
+            config=config,
+            command=command,
+            start_time=start_time,
+            end_time=datetime.now(),
+            best_epoch=best_epoch,
+            best_metric=best_mAP,
+            best_metric_name="val_mAP",
+            dataset_info={
+                "train_frames": len(train_dataset),
+                "val_frames": len(val_stream),
+            },
+            extra_info={"world_size": world_size},
+            repo_path=PROJECT_ROOT,
+        )
 
-    print(f"\nRun directory: {run_dir}")
+        print(f"\nRun directory: {run_dir}")
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

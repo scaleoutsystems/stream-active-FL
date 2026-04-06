@@ -7,7 +7,7 @@ output_dir: "outputs/streaming/uncertainty_filter"
 
 # Model / classes
 num_classes: 11
-target_classes: null  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -58,6 +58,7 @@ bootstrap_fail_on_smoke_check: true
 
 # DataLoader
 num_workers: 8
+use_amp: true
 
 # Reproducibility
 seed: 42

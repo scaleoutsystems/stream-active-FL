@@ -3,7 +3,8 @@
 #SBATCH -p gpu
 #SBATCH -q default
 #SBATCH -N 1
-#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
 #SBATCH -t 24:00:00
 #SBATCH --job-name=offline_det
 #SBATCH --output=/project/home/p201222/data/ZOD_frames_preprocessed/logs/offline_det_%j.out
