@@ -1,7 +1,7 @@
 # Offline baseline: multi-epoch shuffled training on all frames (performance ceiling)
 
 # Paths
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest.json"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/offline/baseline"
 
 # Model / classes
@@ -15,7 +15,7 @@ pretrained_detector: true
 load_checkpoint: null
 
 # Training
-epochs: 50
+epochs: 60
 batch_size: 16
 lr: 8.0e-4
 weight_decay: 1.0e-4
