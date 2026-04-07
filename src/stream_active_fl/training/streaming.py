@@ -11,7 +11,9 @@ Phase 2 -- Streaming:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sized, Tuple
 
 import torch
@@ -39,6 +41,8 @@ class StreamingTrainResult:
     items_rejected: int
     buffer_flushes: int
     optimizer_steps: int
+    best_eval_mAP: float = 0.0
+    best_eval_checkpoint: int = 0
 
 
 # =============================================================================
@@ -199,6 +203,21 @@ def collect_embeddings(
 # =============================================================================
 
 
+def _compute_streaming_lr(
+    items_processed: int,
+    base_lr: float,
+    warmup_items: int,
+    total_items: int,
+    min_factor: float,
+) -> float:
+    """Linear warmup followed by cosine decay to base_lr * min_factor."""
+    if items_processed < warmup_items:
+        return base_lr * (items_processed / max(warmup_items, 1))
+    progress = (items_processed - warmup_items) / max(total_items - warmup_items, 1)
+    progress = min(progress, 1.0)
+    return base_lr * (min_factor + (1.0 - min_factor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+
 def train_on_stream(
     model: nn.Module,
     stream: Iterable[StreamItem],
@@ -220,6 +239,10 @@ def train_on_stream(
     progress_bar: bool = True,
     total_items: Optional[int] = None,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    base_lr: Optional[float] = None,
+    lr_warmup_items: int = 0,
+    lr_min_factor: float = 0.1,
+    best_model_dir: Optional[Path] = None,
 ) -> StreamingTrainResult:
     """
     Single-pass buffer-based streaming training.
@@ -253,6 +276,11 @@ def train_on_stream(
         novelty_tracker: Optional NoveltyTracker for novelty metrics.
         progress_bar: Show progress bar.
         total_items: Total expected items (for progress bar).
+        scaler: Optional GradScaler for AMP.
+        base_lr: When set, enables linear warmup + cosine decay LR schedule.
+        lr_warmup_items: Items for linear LR warmup (requires base_lr).
+        lr_min_factor: Final LR = base_lr * lr_min_factor (requires base_lr).
+        best_model_dir: When set, saves best_model.pt on each new best mAP.
 
     Returns:
         StreamingTrainResult with processing statistics.
@@ -274,8 +302,17 @@ def train_on_stream(
 
     use_amp = scaler is not None and scaler.is_enabled()
 
+    use_lr_schedule = base_lr is not None and total_items is not None and total_items > 0
+
+    best_eval_mAP = 0.0
+    best_eval_checkpoint = 0
+
     running_train_loss = 0.0
     train_loss_steps = 0
+
+    def _set_lr(lr: float) -> None:
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
 
     def _optimizer_step(
         images: List[torch.Tensor],
@@ -285,6 +322,13 @@ def train_on_stream(
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         model.train()
+
+        if use_lr_schedule:
+            assert base_lr is not None and total_items is not None
+            new_lr = _compute_streaming_lr(
+                items_processed, base_lr, lr_warmup_items, total_items, lr_min_factor,
+            )
+            _set_lr(new_lr)
 
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=use_amp):
@@ -416,9 +460,20 @@ def train_on_stream(
                 eval_metrics = eval_fn(model)
                 metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
 
+                current_mAP = eval_metrics.get("mAP", 0.0)
+                if current_mAP > best_eval_mAP:
+                    best_eval_mAP = current_mAP
+                    best_eval_checkpoint = checkpoint_idx
+                    if best_model_dir is not None:
+                        torch.save(
+                            {"model_state_dict": model.state_dict()},
+                            best_model_dir / "best_model.pt",
+                        )
+
                 if pbar is not None:
                     pbar.set_postfix({
-                        "mAP": f"{eval_metrics.get('mAP', 0.0):.3f}",
+                        "mAP": f"{current_mAP:.3f}",
+                        "best": f"{best_eval_mAP:.3f}",
                         "accept": f"{filter_stats.get('accept_rate', 1.0):.2f}",
                     })
 
@@ -432,4 +487,6 @@ def train_on_stream(
         items_rejected=items_rejected,
         buffer_flushes=training_buffer.total_flushes,
         optimizer_steps=optimizer_steps,
+        best_eval_mAP=best_eval_mAP,
+        best_eval_checkpoint=best_eval_checkpoint,
     )

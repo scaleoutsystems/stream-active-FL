@@ -16,8 +16,8 @@ load_checkpoint: null
 
 # Bootstrap phase (set bootstrap_run_dir to reuse a previous bootstrap)
 bootstrap_run_dir: null
-bootstrap_frames: 2000
-bootstrap_epochs: 20
+bootstrap_frames: 1000
+bootstrap_epochs: 10
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
@@ -25,12 +25,16 @@ bootstrap_lr: 4.0e-4
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
-buffer_capacity: 16
+buffer_capacity: 32
 train_steps_per_buffer: 1
 buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
-local_epochs_per_buffer: 3
+local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
+
+# Streaming LR schedule (linear warmup + cosine decay)
+streaming_lr_warmup_items: 1000
+streaming_lr_min_factor: 0.1
 
 # Augmentation
 augment: true

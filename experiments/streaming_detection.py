@@ -125,6 +125,10 @@ class StreamingDetectionConfig:
     # Gradient-norm policy
     norm_window_size: int = 500
 
+    # Streaming LR schedule (linear warmup + cosine decay)
+    streaming_lr_warmup_items: int = 0
+    streaming_lr_min_factor: float = 0.1
+
     # Evaluation
     eval_every_n_items: int = 5000
     checkpoint_interval: int = 1000
@@ -477,7 +481,15 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     )
 
     # Run streaming training
-    print(f"\nStreaming {len(train_stream)} frames...")
+    stream_length = len(train_stream)
+    use_lr_schedule = config.streaming_lr_warmup_items > 0
+    if use_lr_schedule:
+        print(
+            f"LR schedule: warmup {config.streaming_lr_warmup_items} items, "
+            f"cosine decay to {config.streaming_lr * config.streaming_lr_min_factor:.2e}"
+        )
+
+    print(f"\nStreaming {stream_length} frames...")
     result = train_on_stream(
         model=model,
         stream=train_stream,
@@ -495,8 +507,12 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         eval_fn=eval_fn,
         eval_every_n_checkpoints=eval_interval,
         novelty_tracker=novelty_tracker,
-        total_items=len(train_stream),
+        total_items=stream_length,
         scaler=scaler,
+        base_lr=config.streaming_lr if use_lr_schedule else None,
+        lr_warmup_items=config.streaming_lr_warmup_items,
+        lr_min_factor=config.streaming_lr_min_factor,
+        best_model_dir=run_dir,
     )
 
     print("\n" + "=" * 60)
@@ -506,6 +522,8 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     print(f"  Rejected        : {result.items_rejected}")
     print(f"  Buffer flushes  : {result.buffer_flushes}")
     print(f"  Optimizer steps : {result.optimizer_steps}")
+    if result.best_eval_mAP > 0:
+        print(f"  Best mAP        : {result.best_eval_mAP:.4f} (checkpoint {result.best_eval_checkpoint})")
     print("=" * 60)
 
     # Novelty summary
@@ -544,6 +562,10 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         metric_key="final_val_mAP",
         dataset_info=dataset_info,
         repo_path=PROJECT_ROOT,
+        extra_info={
+            "best_stream_mAP": result.best_eval_mAP,
+            "best_stream_checkpoint": result.best_eval_checkpoint,
+        },
     )
 
     print(f"\nRun directory: {run_dir}")

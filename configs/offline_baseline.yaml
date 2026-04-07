@@ -15,7 +15,7 @@ pretrained_detector: true
 load_checkpoint: null
 
 # Training
-epochs: 30
+epochs: 50
 batch_size: 16
 lr: 8.0e-4
 weight_decay: 1.0e-4

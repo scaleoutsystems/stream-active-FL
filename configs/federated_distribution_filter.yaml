@@ -17,8 +17,8 @@ load_checkpoint: null
 
 # Shared bootstrap (set bootstrap_run_dir to reuse)
 bootstrap_run_dir: null
-bootstrap_frames: 2000
-bootstrap_epochs: 20
+bootstrap_frames: 1000
+bootstrap_epochs: 10
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
@@ -32,10 +32,10 @@ partition_strategy: "contiguous"
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
-buffer_capacity: 16
+buffer_capacity: 32
 train_steps_per_buffer: 1
 buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
-local_epochs_per_buffer: 3
+local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
@@ -46,7 +46,7 @@ color_jitter: true
 
 # Filtering policy (per-client): distribution-based
 filter_policy: "distribution"
-accept_fraction: 0.3
+accept_fraction: 0.5
 warmup_items: 200
 score_window_size: 500
 distribution_mode: "mahalanobis"

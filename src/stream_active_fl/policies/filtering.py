@@ -373,13 +373,17 @@ class DistributionBasedPolicy(FilterPolicy):
         score = self._compute_score(embedding)
         self.score_history.append(score)
 
+        # Update running stats for ALL items so the mean tracks the true
+        # stream distribution, preventing the acceptance rate from drifting
+        # below the target fraction.
+        if self.update_stats:
+            self._update_running_stats(embedding)
+
         meta = {"score": score, "mode": self.mode}
 
         # Warmup: accept all to build score distribution
         if self.items_seen <= self.warmup_items:
             self.count_accept += 1
-            if self.update_stats:
-                self._update_running_stats(embedding)
             self.selection_tracker.record("accept", stream_item.categories)
             return ("accept", meta)
 
@@ -388,8 +392,6 @@ class DistributionBasedPolicy(FilterPolicy):
 
         if score >= threshold:
             self.count_accept += 1
-            if self.update_stats:
-                self._update_running_stats(embedding)
             self.selection_tracker.record("accept", stream_item.categories)
             return ("accept", meta)
         else:
