@@ -48,7 +48,7 @@ color_jitter: true
 filter_policy: "gradient_norm"
 accept_fraction: 0.5
 warmup_items: 200
-norm_window_size: 500
+norm_window_size: 100
 
 # Evaluation
 eval_every_n_rounds: 1

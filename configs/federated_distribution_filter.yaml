@@ -48,7 +48,7 @@ color_jitter: true
 filter_policy: "distribution"
 accept_fraction: 0.5
 warmup_items: 200
-score_window_size: 500
+score_window_size: 100
 distribution_mode: "mahalanobis"
 embedding_buffer_size: 1000
 knn_k: 10

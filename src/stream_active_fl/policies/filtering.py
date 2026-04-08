@@ -100,6 +100,8 @@ class FilterPolicy(ABC):
 
     def __init__(self):
         self.selection_tracker = SelectionTracker()
+        self.accept_fraction: float = 1.0
+        self._recent_decisions: deque[int] = deque(maxlen=200)
 
     @abstractmethod
     def select_action(
@@ -142,13 +144,37 @@ class FilterPolicy(ABC):
         score_history: deque,
         accept_fraction: float,
     ) -> float:
-        """Return the adaptive threshold from a sliding window of scores."""
+        """Return the adaptive threshold from a sliding window of scores.
+
+        The threshold is the ``(1 - accept_fraction)`` quantile of the
+        recent scores.  Items scoring above this threshold are accepted,
+        which mechanically targets an acceptance rate of
+        ``accept_fraction``.
+
+        Args:
+            score_history: Recent scores (sliding window).
+            accept_fraction: Target fraction of items to accept.
+        """
         if len(score_history) == 0:
             return 0.0
         sorted_scores = sorted(score_history)
         idx = int(len(sorted_scores) * (1.0 - accept_fraction))
         idx = min(idx, len(sorted_scores) - 1)
         return sorted_scores[idx]
+
+    def _effective_accept_fraction(self) -> float:
+        """Return the accept fraction adjusted by a proportional correction.
+
+        Uses the recent post-warmup decision history to detect systematic
+        deviation from the configured ``accept_fraction`` and compensate.
+        The correction is stateless (pure function of the current window)
+        so it cannot wind up.
+        """
+        if len(self._recent_decisions) < 50:
+            return self.accept_fraction
+        observed = sum(self._recent_decisions) / len(self._recent_decisions)
+        error = self.accept_fraction - observed  # positive ⇒ under-accepting
+        return max(0.05, min(0.95, self.accept_fraction + 0.5 * error))
 
 
 # =============================================================================
@@ -349,7 +375,9 @@ class DistributionBasedPolicy(FilterPolicy):
         raise ValueError(f"Unknown mode: {self.mode}")
 
     def _get_threshold(self) -> float:
-        return self._compute_adaptive_threshold(self.score_history, self.accept_fraction)
+        return self._compute_adaptive_threshold(
+            self.score_history, self._effective_accept_fraction(),
+        )
 
     def _update_running_stats(self, embedding: torch.Tensor) -> None:
         """Incrementally update running mean with a new embedding."""
@@ -392,10 +420,12 @@ class DistributionBasedPolicy(FilterPolicy):
 
         if score >= threshold:
             self.count_accept += 1
+            self._recent_decisions.append(1)
             self.selection_tracker.record("accept", stream_item.categories)
             return ("accept", meta)
         else:
             self.count_reject += 1
+            self._recent_decisions.append(0)
             self.selection_tracker.record("reject", stream_item.categories)
             return ("reject", meta)
 
@@ -408,6 +438,7 @@ class DistributionBasedPolicy(FilterPolicy):
             "items_seen": self.items_seen,
             "mode": self.mode,
             "accept_fraction": self.accept_fraction,
+            "effective_accept_fraction": self._effective_accept_fraction(),
             "bootstrap_count": self.bootstrap_count,
             "update_stats_enabled": self.update_stats,
             "current_threshold": self._get_threshold(),
@@ -472,7 +503,9 @@ class UncertaintyBasedPolicy(FilterPolicy):
         return 1.0 - mean_conf
 
     def _get_threshold(self) -> float:
-        return self._compute_adaptive_threshold(self.score_history, self.accept_fraction)
+        return self._compute_adaptive_threshold(
+            self.score_history, self._effective_accept_fraction(),
+        )
 
     @torch.no_grad()
     def select_action(
@@ -507,10 +540,12 @@ class UncertaintyBasedPolicy(FilterPolicy):
 
         if uncertainty >= threshold:
             self.count_accept += 1
+            self._recent_decisions.append(1)
             self.selection_tracker.record("accept", stream_item.categories)
             return ("accept", meta)
         else:
             self.count_reject += 1
+            self._recent_decisions.append(0)
             self.selection_tracker.record("reject", stream_item.categories)
             return ("reject", meta)
 
@@ -522,6 +557,7 @@ class UncertaintyBasedPolicy(FilterPolicy):
             "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
             "accept_fraction": self.accept_fraction,
+            "effective_accept_fraction": self._effective_accept_fraction(),
             "current_threshold": self._get_threshold(),
         }
 
@@ -592,7 +628,9 @@ class GradientNormPolicy(FilterPolicy):
         return total ** 0.5
 
     def _get_threshold(self) -> float:
-        return self._compute_adaptive_threshold(self.norm_history, self.accept_fraction)
+        return self._compute_adaptive_threshold(
+            self.norm_history, self._effective_accept_fraction(),
+        )
 
     def select_action(
         self,
@@ -617,10 +655,12 @@ class GradientNormPolicy(FilterPolicy):
 
         if grad_norm >= threshold:
             self.count_accept += 1
+            self._recent_decisions.append(1)
             self.selection_tracker.record("accept", stream_item.categories)
             return ("accept", meta)
         else:
             self.count_reject += 1
+            self._recent_decisions.append(0)
             self.selection_tracker.record("reject", stream_item.categories)
             return ("reject", meta)
 
@@ -632,5 +672,6 @@ class GradientNormPolicy(FilterPolicy):
             "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
             "accept_fraction": self.accept_fraction,
+            "effective_accept_fraction": self._effective_accept_fraction(),
             "current_threshold": self._get_threshold(),
         }

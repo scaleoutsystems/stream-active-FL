@@ -48,7 +48,7 @@ color_jitter: true
 filter_policy: "uncertainty"
 accept_fraction: 0.5
 warmup_items: 200
-score_window_size: 500
+score_window_size: 100
 confidence_threshold: 0.1
 top_k_detections: 5
 
