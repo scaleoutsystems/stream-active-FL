@@ -5,8 +5,6 @@ description = "Continuous, Active Federated Learning for Data Streams"
 requires-python = ">=3.10"
 
 dependencies = [
-    "torch>=2.0",
-    "torchvision>=0.15",
     "numpy",
     "pillow",
     "tqdm",
@@ -18,6 +16,15 @@ dependencies = [
 dev = [
     "pytest",
     "ruff",
+]
+notebook = [
+    "ipykernel",
+    "matplotlib",
+    "pandas",
+]
+local-torch = [
+    "torch>=2.0",
+    "torchvision>=0.15",
 ]
 
 [build-system]
