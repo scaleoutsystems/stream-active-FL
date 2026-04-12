@@ -1,13 +1,14 @@
-# Federated streaming detection with distribution-based filtering (FedAvg)
-# Accepts frames whose backbone embedding is on the tail of the distribution
+# Federated: distribution threshold with city-day bootstrap, REVERSE ordering
+# Client 0 starts with rural (most different from bootstrap), Client 3 ends with city
+# Tests whether the filter correctly identifies high novelty when client data is maximally
+# shifted from the bootstrap distribution
 
-# Paths
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
-output_dir: "outputs/federated/distribution_filter"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_reverse.json"
+output_dir: "outputs/federated/fed_dist_thresh_cityday_reverse_p10"
 
 # Model / classes
 num_classes: 11
-target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -15,16 +16,16 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Shared bootstrap (set bootstrap_run_dir to reuse)
+# Shared bootstrap
 bootstrap_run_dir: null
-bootstrap_frames: 1000
-bootstrap_epochs: 10
+bootstrap_frames: 5000
+bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
 # Federated setup
 num_clients: 4
-num_rounds: 10
+num_rounds: 11
 local_items_per_round: 2000
 partition_strategy: "contiguous"
 
@@ -34,7 +35,7 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 buffer_capacity: 32
 train_steps_per_buffer: 1
-buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
+buffer_training_mode: "mini_batch"
 local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
@@ -44,15 +45,17 @@ augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering policy (per-client): distribution-based
+# Filtering: distribution-based, frozen-reference threshold
 filter_policy: "distribution"
-accept_fraction: 0.5
-warmup_items: 200
-score_window_size: 100
+budget_mode: "fixed_threshold"
+threshold_percentile: 0.10
+threshold_ema_alpha: 0.0
+warmup_items: 500
+score_window_size: 500
 distribution_mode: "mahalanobis"
 embedding_buffer_size: 1000
 knn_k: 10
-update_distribution_stats: true
+update_distribution_stats: false
 
 # Evaluation
 eval_every_n_rounds: 1

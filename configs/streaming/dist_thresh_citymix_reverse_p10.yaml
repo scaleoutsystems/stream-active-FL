@@ -1,0 +1,73 @@
+# Distribution threshold: city-mixed bootstrap, reverse ordering (rural-first), p=0.10
+# Bootstrap: 5k city frames (proportional day/night/twilight mix, shared prefix)
+# Stream: smaller-rural → arterial-rural → highway → arterial-urban → city
+
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_reverse.json"
+output_dir: "outputs/streaming/dist_thresh_citymix_reverse_p10"
+
+# Model / classes
+num_classes: 11
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
+trainable_backbone_layers: 3
+image_min_size: 480
+image_max_size: 1600
+pretrained_backbone: true
+pretrained_detector: true
+load_checkpoint: null
+
+# Bootstrap phase
+bootstrap_run_dir: null
+bootstrap_frames: 5000
+bootstrap_epochs: 20
+bootstrap_batch_size: 8
+bootstrap_lr: 4.0e-4
+
+# Streaming phase
+streaming_lr: 1.0e-4
+weight_decay: 1.0e-4
+max_grad_norm: 1.0
+buffer_capacity: 32
+train_steps_per_buffer: 1
+buffer_training_mode: "mini_batch"
+local_epochs_per_buffer: 2
+mini_batch_size: 8
+shuffle_buffer_each_epoch: true
+
+# Streaming LR schedule (linear warmup + cosine decay)
+streaming_lr_warmup_items: 1000
+streaming_lr_min_factor: 0.1
+
+# Augmentation
+augment: true
+hflip_prob: 0.5
+color_jitter: true
+
+# Filtering: distribution-based, frozen-reference threshold
+filter_policy: "distribution"
+budget_mode: "fixed_threshold"
+threshold_percentile: 0.10
+threshold_ema_alpha: 0.0
+warmup_items: 500
+score_window_size: 500
+distribution_mode: "mahalanobis"
+embedding_buffer_size: 1000
+knn_k: 10
+update_distribution_stats: false
+
+# Evaluation
+eval_every_n_items: 5000
+checkpoint_interval: 1000
+score_threshold: 0.3
+min_box_area: 64.0
+bootstrap_smoke_check_frames: 200
+bootstrap_smoke_score_threshold: 0.3
+bootstrap_smoke_min_map50: 0.005
+bootstrap_fail_on_smoke_check: true
+
+# DataLoader
+num_workers: 8
+use_amp: true
+
+# Reproducibility
+seed: 42
+device: "cuda"

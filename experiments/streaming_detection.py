@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import shutil
 import sys
@@ -90,7 +91,7 @@ class StreamingDetectionConfig:
     bootstrap_batch_size: int = 8
     bootstrap_lr: float = 4e-4
 
-    # Streaming phase — training
+    # Streaming phase -- training
     streaming_lr: float = 1e-4
     weight_decay: float = 1e-4
     max_grad_norm: float = 1.0
@@ -114,9 +115,13 @@ class StreamingDetectionConfig:
 
     # Distribution-based policy
     distribution_mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis"
+    budget_mode: Literal["adaptive", "fixed_threshold", "global_budget"] = "adaptive"
     embedding_buffer_size: int = 1000
     knn_k: int = 10
     update_distribution_stats: bool = True
+    threshold_percentile: float = 0.5
+    threshold_ema_alpha: float = 0.0
+    total_stream_items: int = 0
 
     # Uncertainty-based policy
     confidence_threshold: float = 0.1
@@ -200,6 +205,7 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     embedding_mean: Optional[torch.Tensor] = None
     embedding_cov: Optional[torch.Tensor] = None
     embedding_count: int = 0
+    bootstrap_scores: Optional[torch.Tensor] = None
 
     # Resolve bootstrap_run_dir (config or CLI override)
     bootstrap_source: Optional[Path] = None
@@ -255,6 +261,16 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                     "Please regenerate bootstrap embeddings with the current code."
                 )
             embedding_count = int(embed_data["count"])
+            if "scores" in embed_data:
+                bootstrap_scores = embed_data["scores"]
+                assert bootstrap_scores is not None
+                print(f"Loaded bootstrap scores: {bootstrap_scores.shape}")
+            else:
+                print(
+                    "WARNING: bootstrap_embeddings.pt has no 'scores' key — "
+                    "threshold will be calibrated from warmup instead. "
+                    "Re-run bootstrap to enable bootstrap-calibrated thresholds."
+                )
             assert embedding_mean is not None and embedding_cov is not None
             print(
                 "Loaded embeddings:"
@@ -381,14 +397,23 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
                 worker_init_fn=worker_init_fn,
                 pin_memory=device.type == "cuda",
             )
-            embedding_mean, embedding_cov, embedding_count = collect_embeddings(model, embed_loader, device)
+            embedding_mean, embedding_cov, embedding_count, bootstrap_scores = (
+                collect_embeddings(model, embed_loader, device)
+            )
             print(f"Embedding mean shape: {embedding_mean.shape}")
             print(f"Embedding cov shape:  {embedding_cov.shape}")
             print(f"Embedding count:      {embedding_count}")
+            print(f"Bootstrap scores:     {bootstrap_scores.shape} "
+                  f"(min={bootstrap_scores.min():.3f}, median={bootstrap_scores.median():.3f}, "
+                  f"max={bootstrap_scores.max():.3f})")
 
-            # Save embeddings
             torch.save(
-                {"mean": embedding_mean, "cov": embedding_cov, "count": embedding_count},
+                {
+                    "mean": embedding_mean,
+                    "cov": embedding_cov,
+                    "count": embedding_count,
+                    "scores": bootstrap_scores,
+                },
                 run_dir / "bootstrap_embeddings.pt",
             )
 
@@ -430,12 +455,25 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         weight_decay=config.weight_decay,
     )
 
+    # Frozen scoring model -- a snapshot of the bootstrap model used for
+    # stable embedding computation in distribution-based policies.
+    scoring_model: Optional[nn.Module] = None
+    if config.filter_policy == "distribution":
+        scoring_model = copy.deepcopy(model)
+        scoring_model.eval()
+        for p in scoring_model.parameters():
+            p.requires_grad = False
+        print("Created frozen scoring model for stable novelty measurement")
+
     # Filter policy
+    _bs_list = bootstrap_scores.tolist() if bootstrap_scores is not None else None
     filter_policy = create_filter_policy(
         config,
         bootstrap_mean=embedding_mean,
         bootstrap_cov=embedding_cov,
         bootstrap_count=embedding_count,
+        scoring_model=scoring_model,
+        bootstrap_scores=_bs_list,
     )
     print(f"Filter policy: {config.filter_policy}")
 

@@ -36,4 +36,6 @@ srun python tools/preprocessing/build_manifests.py \
   --data-dir "$DATA_DIR" \
   --zod-root "$STREAM_ACTIVE_FL_ZOD_ROOT" \
   --zod-version full \
-  --variants base temporal road_type urban_rural
+  --variants base temporal road_type road_type_reverse road_type_time conditions urban_rural \
+  --generate-bootstraps \
+  --generate-shared-manifests

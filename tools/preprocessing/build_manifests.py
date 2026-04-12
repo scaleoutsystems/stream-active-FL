@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-Generate manifest files for streaming experiments.
+Generate manifest files for streaming experiments from preprocessed ZOD data.
 
 The base manifest is built by scanning a preprocessed data directory
-(images/ and annotations/) and looking up ZOD metadata for timestamps
-and train/val splits.  Ordering variants reorder the train frames for
-different streaming strategies.
+(images/ and annotations/) and looking up ZOD metadata for each
+frame (timestamps, train/val splits, road type, weather, etc.).
 
-Outputs (written to <data-dir>/):
-  manifest.json             Base manifest
-  manifest_temporal.json    Train frames sorted by timestamp
-  manifest_road_type.json   Train frames grouped by road type
-  manifest_urban_rural.json Train frames grouped into urban/rural/highway
+Ordering variants reorder the train frames into contiguous domain blocks
+while keeping val frames in their original positions.
+
+Outputs (all written to <data-dir>/):
+
+  manifest.json                  Base manifest (original frame order)
+  manifest_temporal.json         Train frames sorted by capture timestamp
+  manifest_road_type.json        Blocks by ZOD road_type
+                                 (city | arterial-urban | highway |
+                                 arterial-rural | smaller-rural)
+  manifest_road_type_reverse.json  Same blocks in reverse order
+  manifest_road_type_time.json   Compound blocks: road_type x time_of_day
+  manifest_conditions.json       Blocks by weather / road-surface condition
+  manifest_urban_rural.json      Coarse 3-way grouping (urban | rural | highway)
 
 Usage:
-  Generate everything:
-    python tools/preprocessing/build_manifests.py \\
-        --data-dir data/Frames_1600x480 \\
-        --zod-root /path/to/zod
 
-  Generate only the base manifest:
+    # Generate all variants (requires ZOD access):
     python tools/preprocessing/build_manifests.py \\
-        --data-dir data/Frames_1600x480 \\
-        --zod-root /path/to/zod \\
-        --variants base
+        --data-dir data/Frames_1600x480 --zod-root /path/to/zod
 
-  Generate only ordering variants (base manifest must already exist):
+    # Regenerate only ordering variants (base manifest must exist):
     python tools/preprocessing/build_manifests.py \\
-        --data-dir data/Frames_1600x480 \\
-        --variants temporal
+        --data-dir data/Frames_1600x480 --zod-root /path/to/zod \\
+        --variants road_type road_type_reverse conditions
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ import sys
 from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Literal, cast
+from typing import Any, Callable, Dict, List, Literal, Tuple, cast
 
 from tqdm import tqdm
 
@@ -53,37 +55,52 @@ from config import (
 )
 
 ZodVersion = Literal["full", "mini"]
+ZodMeta = Dict[str, Dict[str, Any]]
+BucketFn = Callable[[Dict[str, Any]], str]
 
 
 # =============================================================================
-# IO
+# IO helpers
 # =============================================================================
 
 
 def load_manifest(path: Path) -> Dict[str, Any]:
-    """Read a manifest JSON file and return its contents as a dict."""
+    """Read a manifest JSON file."""
     with path.open("r") as f:
         return json.load(f)
 
 
 def save_manifest(path: Path, manifest: Dict[str, Any]) -> None:
-    """Write a manifest dict to path as pretty-printed JSON."""
+    """Write a manifest dict as pretty-printed JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
         json.dump(manifest, f, indent=2)
 
 
 # =============================================================================
-# ZOD metadata
+# ZOD metadata extraction
 # =============================================================================
+
+_ZOD_STR_FIELDS = ("road_type", "time_of_day", "road_condition",
+                    "scraped_weather", "country_code")
+_ZOD_INT_FIELDS = ("num_vehicles", "num_pedestrians",
+                    "num_vulnerable_vehicles", "num_traffic_signs",
+                    "num_traffic_lights")
 
 
 def _load_zod_metadata(
     frame_ids: List[str],
     zod_root: str,
     zod_version: ZodVersion,
-) -> Dict[str, Dict[str, Any]]:
-    """Load timestamps, train/val splits, and road type from ZOD."""
+) -> ZodMeta:
+    """Load per-frame metadata from the ZOD dataset.
+
+    Returns a dict mapping frame_id to a metadata dict containing:
+    timestamp, split, road_type, time_of_day, road_condition,
+    scraped_weather, country_code, num_vehicles, num_pedestrians,
+    num_vulnerable_vehicles, num_traffic_signs, num_traffic_lights,
+    solar_angle_elevation.
+    """
     from zod import ZodFrames
     from zod.constants import TRAIN, VAL
 
@@ -91,24 +108,37 @@ def _load_zod_metadata(
     train_ids = zod_frames.get_split(TRAIN)
     val_ids = zod_frames.get_split(VAL)
 
-    meta: Dict[str, Dict[str, Any]] = {}
+    meta: ZodMeta = {}
     for fid in tqdm(frame_ids, desc="Loading ZOD metadata"):
-        frame_meta = zod_frames[fid].metadata
-        meta[fid] = {
-            "timestamp": extract_timestamp(frame_meta),
-            "split": "train" if fid in train_ids else ("val" if fid in val_ids else "unknown"),
-            "road_type": str(getattr(frame_meta, "road_type", "unknown") or "unknown"),
+        fm = zod_frames[fid].metadata
+
+        entry: Dict[str, Any] = {
+            "timestamp": extract_timestamp(fm),
+            "split": (
+                "train" if fid in train_ids
+                else ("val" if fid in val_ids else "unknown")
+            ),
+            "solar_angle_elevation": float(
+                getattr(fm, "solar_angle_elevation", 0.0) or 0.0
+            ),
         }
+        for field in _ZOD_STR_FIELDS:
+            entry[field] = str(getattr(fm, field, "unknown") or "unknown")
+        for field in _ZOD_INT_FIELDS:
+            entry[field] = int(getattr(fm, field, 0) or 0)
+
+        meta[fid] = entry
+
     return meta
 
 
 # =============================================================================
-# Helpers
+# Internal helpers
 # =============================================================================
 
 
-def _temporal_key(frame: Dict[str, Any]) -> tuple[int, str, str]:
-    """Sort key: frames with timestamps first, then by timestamp, then frame_id."""
+def _temporal_key(frame: Dict[str, Any]) -> Tuple[int, str, str]:
+    """Sort key: frames with timestamps first, then by timestamp, then id."""
     ts = frame.get("timestamp")
     if ts is None:
         return (1, "", frame.get("frame_id", ""))
@@ -119,7 +149,8 @@ def _replace_train_order(
     all_frames: List[Dict[str, Any]],
     reordered_train: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Substitute train frames with reordered_train, keeping val frames in place."""
+    """Replace train frames in all_frames with reordered_train, keeping
+    val frames in their original positions."""
     idx = 0
     out: List[Dict[str, Any]] = []
     for f in all_frames:
@@ -130,13 +161,14 @@ def _replace_train_order(
             out.append(f)
     if idx != len(reordered_train):
         raise ValueError(
-            f"Train frame count mismatch: expected {len(reordered_train)}, placed {idx}"
+            f"Train frame count mismatch: expected {len(reordered_train)}, "
+            f"placed {idx}"
         )
     return out
 
 
 def _urban_rural_bucket(road_type: str) -> str:
-    """Map road_type to coarse urban/rural/highway/other bucket."""
+    """Map a ZOD road_type string to a coarse 3-way bucket."""
     road = road_type.lower()
     if road in {"city", "arterial-urban"}:
         return "urban"
@@ -147,18 +179,48 @@ def _urban_rural_bucket(road_type: str) -> str:
     return "other"
 
 
+def _weather_bucket(weather: str, road_condition: str) -> str:
+    """Map scraped_weather + road_condition to a coarse conditions bucket."""
+    w = weather.lower()
+    rc = road_condition.lower()
+    if "snow" in w or "snow" in rc:
+        return "snow"
+    if "rain" in w or "wet" in rc:
+        return "rain_wet"
+    if "fog" in w:
+        return "fog"
+    if "cloud" in w or "overcast" in w:
+        return "cloudy"
+    return "clear"
+
+
+def _enrich_frame(entry: Dict[str, Any], zod_meta: ZodMeta) -> None:
+    """Copy ZOD metadata fields into a frame entry dict (in-place)."""
+    m = zod_meta[entry["frame_id"]]
+    for field in _ZOD_STR_FIELDS:
+        entry[field] = m[field]
+    for field in _ZOD_INT_FIELDS:
+        entry[field] = m[field]
+    entry["solar_angle_elevation"] = m["solar_angle_elevation"]
+
+
 # =============================================================================
-# Builders
+# Manifest builders
 # =============================================================================
 
 
 def build_base(
     data_dir: Path,
     frame_ids: List[str],
-    zod_meta: Dict[str, Dict[str, Any]],
+    zod_meta: ZodMeta,
     zod_version: ZodVersion,
 ) -> Dict[str, Any]:
-    """Generate manifest.json by scanning images/annotations and adding ZOD metadata."""
+    """Build the base manifest by scanning images/annotations and merging
+    ZOD metadata.
+
+    Each frame entry contains annotation info (num_objects,
+    categories_present) plus all available ZOD metadata fields.
+    """
     annotations_dir = data_dir / "annotations"
     entries: List[Dict[str, Any]] = []
 
@@ -174,7 +236,7 @@ def build_base(
             categories_present = []
 
         m = zod_meta[fid]
-        entries.append({
+        entry: Dict[str, Any] = {
             "frame_id": fid,
             "image_path": f"images/{fid}.jpg",
             "annotation_path": f"annotations/{fid}.json",
@@ -182,10 +244,17 @@ def build_base(
             "categories_present": categories_present,
             "timestamp": m["timestamp"],
             "split": m["split"],
-        })
+        }
+        _enrich_frame(entry, zod_meta)
+        entries.append(entry)
 
     ts_count = sum(1 for e in entries if e["timestamp"] is not None)
-    print(f"[base] frames: {len(entries)}, with timestamps: {ts_count}")
+    train = [e for e in entries if e["split"] == "train"]
+    print(f"[base] {len(entries)} frames ({len(train)} train), "
+          f"{ts_count} with timestamps")
+    for field in ("road_type", "time_of_day", "road_condition", "scraped_weather"):
+        dist = Counter(e.get(field, "unknown") for e in train)
+        print(f"  {field}: {dict(dist)}")
 
     return {
         "version": zod_version,
@@ -199,79 +268,313 @@ def build_base(
 
 
 def build_temporal(manifest: Dict[str, Any]) -> Dict[str, Any]:
-    """Sort train frames by timestamp."""
+    """Reorder train frames by capture timestamp (ascending)."""
     frames = manifest["frames"]
     train = [f for f in frames if f.get("split") == "train"]
     sorted_train = sorted(train, key=_temporal_key)
 
     out = deepcopy(manifest)
-    out["frames"] = _replace_train_order(frames, sorted_train)
+    out["frames"] = _replace_train_order(out["frames"], sorted_train)
     out["ordering"] = {"strategy": "temporal", "split_scope": "train_only"}
 
     missing = sum(1 for f in train if f.get("timestamp") is None)
-    print(f"[temporal] train frames: {len(train)}, missing timestamps: {missing}")
+    print(f"[temporal] {len(train)} train frames, {missing} missing timestamps")
     return out
+
+
+def _build_block_manifest(
+    manifest: Dict[str, Any],
+    block_order: List[str],
+    bucket_fn: BucketFn,
+    strategy_name: str,
+    bucket_field: str = "scene_bucket",
+) -> Dict[str, Any]:
+    """Group train frames into contiguous blocks, temporally sorted within
+    each block.
+
+    Args:
+        manifest: Source manifest (not modified).
+        block_order: Preferred ordering of block labels.  Blocks present
+            in the data appear in this order; any extra blocks are appended
+            alphabetically.
+        bucket_fn: Maps a frame dict to its block label string.
+        strategy_name: Value stored in ordering.strategy.
+        bucket_field: Key added to each train frame with its block label.
+
+    Returns:
+        A new manifest dict with reordered train frames.
+    """
+    out = deepcopy(manifest)
+    train = [f for f in out["frames"] if f.get("split") == "train"]
+
+    by_block: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for f in train:
+        bucket = bucket_fn(f)
+        f[bucket_field] = bucket
+        by_block[bucket].append(f)
+
+    order = [b for b in block_order if b in by_block] + sorted(
+        b for b in by_block if b not in block_order
+    )
+
+    reordered: List[Dict[str, Any]] = []
+    for b in order:
+        reordered.extend(sorted(by_block[b], key=_temporal_key))
+
+    out["frames"] = _replace_train_order(out["frames"], reordered)
+
+    block_sizes = {b: len(by_block[b]) for b in order}
+    out["ordering"] = {
+        "strategy": strategy_name,
+        "block_order": order,
+        "block_sizes": block_sizes,
+    }
+
+    print(f"[{strategy_name}] {block_sizes}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Road-type orderings
+# ---------------------------------------------------------------------------
+
+ROAD_TYPE_ORDER = [
+    "city", "arterial-urban", "highway", "arterial-rural", "smaller-rural",
+]
 
 
 def build_road_type(
     manifest: Dict[str, Any],
-    zod_meta: Dict[str, Dict[str, Any]],
+    zod_meta: ZodMeta,
 ) -> Dict[str, Any]:
-    """Group train frames by road type, temporally sorted within each group."""
-    frames = manifest["frames"]
-    train = [f for f in frames if f.get("split") == "train"]
+    """Group train frames by ZOD road_type.
 
-    by_road: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for f in train:
-        by_road[zod_meta[f["frame_id"]]["road_type"]].append(f)
-
-    preferred = ["city", "arterial-urban", "highway", "arterial-rural", "smaller-rural"]
-    order = [r for r in preferred if r in by_road] + sorted(
-        r for r in by_road if r not in preferred
+    Block order: city, arterial-urban, highway, arterial-rural, smaller-rural.
+    """
+    return _build_block_manifest(
+        manifest,
+        block_order=ROAD_TYPE_ORDER,
+        bucket_fn=lambda f: zod_meta[f["frame_id"]]["road_type"],
+        strategy_name="road_type_blocks",
     )
 
-    reordered: List[Dict[str, Any]] = []
-    for r in order:
-        reordered.extend(sorted(by_road[r], key=_temporal_key))
 
-    out = deepcopy(manifest)
-    out["frames"] = _replace_train_order(frames, reordered)
-    out["ordering"] = {"strategy": "road_type_blocks", "block_order": order}
+def build_road_type_reverse(
+    manifest: Dict[str, Any],
+    zod_meta: ZodMeta,
+) -> Dict[str, Any]:
+    """Group train frames by ZOD road_type in reverse order.
 
-    counts = dict(Counter(zod_meta[f["frame_id"]]["road_type"] for f in train))
-    seq = [zod_meta[f["frame_id"]]["road_type"] for f in reordered]
-    transitions = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
-    print(f"[road_type] counts: {counts}, transitions: {transitions}")
-    return out
+    Block order: smaller-rural, arterial-rural, highway, arterial-urban, city.
+    """
+    return _build_block_manifest(
+        manifest,
+        block_order=list(reversed(ROAD_TYPE_ORDER)),
+        bucket_fn=lambda f: zod_meta[f["frame_id"]]["road_type"],
+        strategy_name="road_type_reverse_blocks",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compound orderings
+# ---------------------------------------------------------------------------
+
+
+def build_road_type_time(
+    manifest: Dict[str, Any],
+    zod_meta: ZodMeta,
+) -> Dict[str, Any]:
+    """Group train frames by (road_type, time_of_day) compound blocks.
+
+    Creates blocks like city_day, city_night, highway_day, etc.
+    Road types appear in standard order; within each, day before twilight
+    before night.
+    """
+    time_order = ["day", "twilight", "night"]
+    preferred = [f"{r}_{t}" for r in ROAD_TYPE_ORDER for t in time_order]
+
+    def bucket_fn(f: Dict[str, Any]) -> str:
+        m = zod_meta[f["frame_id"]]
+        return f"{m['road_type']}_{m['time_of_day']}"
+
+    return _build_block_manifest(
+        manifest,
+        block_order=preferred,
+        bucket_fn=bucket_fn,
+        strategy_name="road_type_time_blocks",
+    )
+
+
+def build_conditions(
+    manifest: Dict[str, Any],
+    zod_meta: ZodMeta,
+) -> Dict[str, Any]:
+    """Group train frames by weather / road-surface condition.
+
+    Buckets: clear, cloudy, fog, rain_wet, snow.
+    """
+    preferred = ["clear", "cloudy", "fog", "rain_wet", "snow"]
+
+    def bucket_fn(f: Dict[str, Any]) -> str:
+        m = zod_meta[f["frame_id"]]
+        return _weather_bucket(m["scraped_weather"], m["road_condition"])
+
+    return _build_block_manifest(
+        manifest,
+        block_order=preferred,
+        bucket_fn=bucket_fn,
+        strategy_name="conditions_blocks",
+    )
 
 
 def build_urban_rural(
     manifest: Dict[str, Any],
-    zod_meta: Dict[str, Dict[str, Any]],
+    zod_meta: ZodMeta,
 ) -> Dict[str, Any]:
-    """Group train frames by urban/rural/highway bucket, temporally sorted within."""
-    frames = manifest["frames"]
-    train = [f for f in frames if f.get("split") == "train"]
+    """Group train frames into coarse urban / rural / highway blocks."""
+    preferred = ["urban", "rural", "highway", "other"]
 
-    by_bucket: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for f in train:
-        by_bucket[_urban_rural_bucket(zod_meta[f["frame_id"]]["road_type"])].append(f)
+    def bucket_fn(f: Dict[str, Any]) -> str:
+        return _urban_rural_bucket(zod_meta[f["frame_id"]]["road_type"])
 
-    order = ["urban", "rural", "highway", "other"]
-    reordered: List[Dict[str, Any]] = []
-    for b in order:
-        reordered.extend(sorted(by_bucket.get(b, []), key=_temporal_key))
+    return _build_block_manifest(
+        manifest,
+        block_order=preferred,
+        bucket_fn=bucket_fn,
+        strategy_name="urban_rural_blocks",
+    )
 
+
+# =============================================================================
+# Bootstrap ID generation
+# =============================================================================
+
+
+def build_bootstrap_set(
+    manifest: Dict[str, Any],
+    *,
+    road_type: str = "city",
+    time_of_day: str | None = None,
+    n: int = 5000,
+) -> List[str]:
+    """Select n train frame IDs matching the given criteria.
+
+    Frames are filtered by road_type (required) and optionally
+    time_of_day.  When time_of_day is None, a proportional
+    mix of day/night/twilight is drawn for the selected road type.
+
+    Within each stratum, frames are sorted by timestamp so the
+    selection is deterministic.
+    """
+    train = [f for f in manifest["frames"] if f.get("split") == "train"]
+    matching = [f for f in train if f.get("road_type") == road_type]
+
+    if time_of_day is not None:
+        matching = [f for f in matching if f.get("time_of_day") == time_of_day]
+        matching.sort(key=_temporal_key)
+        if len(matching) < n:
+            raise ValueError(
+                f"Only {len(matching)} frames match road_type={road_type}, "
+                f"time_of_day={time_of_day} (need {n})"
+            )
+        selected = matching[:n]
+    else:
+        by_tod: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for f in matching:
+            by_tod[f.get("time_of_day", "unknown")].append(f)
+        for v in by_tod.values():
+            v.sort(key=_temporal_key)
+
+        total = len(matching)
+        selected_frames: List[Dict[str, Any]] = []
+        remaining = n
+        tod_keys = sorted(by_tod.keys())
+        for i, tod in enumerate(tod_keys):
+            if i == len(tod_keys) - 1:
+                count = remaining
+            else:
+                count = round(n * len(by_tod[tod]) / total)
+                count = min(count, remaining, len(by_tod[tod]))
+            selected_frames.extend(by_tod[tod][:count])
+            remaining -= count
+        if len(selected_frames) < n:
+            for tod in tod_keys:
+                for f in by_tod[tod]:
+                    if f not in selected_frames:
+                        selected_frames.append(f)
+                        if len(selected_frames) >= n:
+                            break
+                if len(selected_frames) >= n:
+                    break
+        selected = selected_frames[:n]
+
+    ids = [f["frame_id"] for f in selected]
+
+    tod_dist = Counter(f.get("time_of_day") for f in selected)
+    ped_count = sum(
+        1 for f in selected
+        if "Pedestrian" in (f.get("categories_present") or [])
+    )
+    print(f"[bootstrap] {len(ids)} frames: road_type={road_type}, "
+          f"time_of_day={time_of_day or 'proportional'}")
+    print(f"  time_of_day: {dict(tod_dist)}")
+    print(f"  Pedestrian presence: {ped_count}/{len(ids)} "
+          f"({ped_count / len(ids) * 100:.1f}%)")
+    return ids
+
+
+def _build_block_manifest_with_bootstrap(
+    manifest: Dict[str, Any],
+    block_order: List[str],
+    bucket_fn: BucketFn,
+    strategy_name: str,
+    bootstrap_ids: List[str],
+    bucket_field: str = "scene_bucket",
+) -> Dict[str, Any]:
+    """Like _build_block_manifest but places bootstrap_ids at the start
+    of the train split and excludes them from the block-ordered stream
+    portion.
+    """
     out = deepcopy(manifest)
-    out["frames"] = _replace_train_order(frames, reordered)
-    out["ordering"] = {"strategy": "urban_rural_blocks", "block_order": order}
+    train = [f for f in out["frames"] if f.get("split") == "train"]
 
-    counts = dict(Counter(
-        _urban_rural_bucket(zod_meta[f["frame_id"]]["road_type"]) for f in train
-    ))
-    seq = [_urban_rural_bucket(zod_meta[f["frame_id"]]["road_type"]) for f in reordered]
-    transitions = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
-    print(f"[urban_rural] counts: {counts}, transitions: {transitions}")
+    boot_set = set(bootstrap_ids)
+    boot_by_id = {f["frame_id"]: f for f in train if f["frame_id"] in boot_set}
+    stream_frames = [f for f in train if f["frame_id"] not in boot_set]
+
+    bootstrap_ordered = [boot_by_id[fid] for fid in bootstrap_ids
+                         if fid in boot_by_id]
+    for f in bootstrap_ordered:
+        f[bucket_field] = f.get("road_type", "bootstrap")
+
+    by_block: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for f in stream_frames:
+        bucket = bucket_fn(f)
+        f[bucket_field] = bucket
+        by_block[bucket].append(f)
+
+    order = [b for b in block_order if b in by_block] + sorted(
+        b for b in by_block if b not in block_order
+    )
+
+    reordered: List[Dict[str, Any]] = []
+    reordered.extend(bootstrap_ordered)
+    for b in order:
+        reordered.extend(sorted(by_block[b], key=_temporal_key))
+
+    out["frames"] = _replace_train_order(out["frames"], reordered)
+
+    block_sizes = {b: len(by_block[b]) for b in order}
+    out["ordering"] = {
+        "strategy": strategy_name,
+        "block_order": order,
+        "block_sizes": block_sizes,
+        "bootstrap_frames": len(bootstrap_ordered),
+        "bootstrap_ids_count": len(bootstrap_ordered),
+    }
+
+    print(f"[{strategy_name}] bootstrap={len(bootstrap_ordered)}, "
+          f"stream blocks={block_sizes}")
     return out
 
 
@@ -279,18 +582,81 @@ def build_urban_rural(
 # CLI
 # =============================================================================
 
-ALL_VARIANTS = ["base", "temporal", "road_type", "urban_rural"]
+ALL_VARIANTS = [
+    "base", "temporal", "road_type", "road_type_reverse",
+    "road_type_time", "conditions", "urban_rural",
+]
+
+_VARIANTS_NEEDING_ZOD = {
+    "base", "road_type", "road_type_reverse", "road_type_time",
+    "conditions", "urban_rural",
+}
+
+_VARIANT_FILENAMES: Dict[str, str] = {
+    "temporal": "manifest_temporal.json",
+    "road_type": "manifest_road_type.json",
+    "road_type_reverse": "manifest_road_type_reverse.json",
+    "road_type_time": "manifest_road_type_time.json",
+    "conditions": "manifest_conditions.json",
+    "urban_rural": "manifest_urban_rural.json",
+}
+
+
+_BOOTSTRAP_PRESETS: Dict[str, Dict[str, Any]] = {
+    "city_day": {"road_type": "city", "time_of_day": "day", "n": 5000},
+    "city_mixed": {"road_type": "city", "time_of_day": None, "n": 5000},
+}
+
+_BOOTSTRAP_ORDERING_COMBOS: List[Tuple[str, str, str]] = [
+    # (bootstrap_preset, ordering_variant, output_filename)
+    ("city_day", "road_type", "manifest_cityday_road_type.json"),
+    ("city_day", "road_type_reverse", "manifest_cityday_reverse.json"),
+    ("city_mixed", "road_type", "manifest_citymix_road_type.json"),
+    ("city_mixed", "road_type_reverse", "manifest_citymix_reverse.json"),
+    ("city_mixed", "conditions", "manifest_citymix_conditions.json"),
+]
+
+
+def _get_ordering_params(
+    variant: str, zod_meta: ZodMeta,
+) -> Tuple[List[str], BucketFn, str]:
+    """Return (block_order, bucket_fn, strategy_name) for a given ordering."""
+    if variant == "road_type":
+        return (
+            ROAD_TYPE_ORDER,
+            lambda f: zod_meta[f["frame_id"]]["road_type"],
+            "road_type_blocks",
+        )
+    elif variant == "road_type_reverse":
+        return (
+            list(reversed(ROAD_TYPE_ORDER)),
+            lambda f: zod_meta[f["frame_id"]]["road_type"],
+            "road_type_reverse_blocks",
+        )
+    elif variant == "conditions":
+        return (
+            ["clear", "cloudy", "fog", "rain_wet", "snow"],
+            lambda f: _weather_bucket(
+                zod_meta[f["frame_id"]]["scraped_weather"],
+                zod_meta[f["frame_id"]]["road_condition"],
+            ),
+            "conditions_blocks",
+        )
+    else:
+        raise ValueError(f"Unknown ordering variant: {variant}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate manifest files")
+    parser = argparse.ArgumentParser(
+        description="Generate manifest files for streaming experiments",
+    )
     parser.add_argument(
         "--data-dir", type=str, required=True,
         help="Preprocessed data directory (contains images/ and annotations/)",
     )
     parser.add_argument(
         "--zod-root", type=str, default=None,
-        help="ZOD dataset root (required for base, road_type, urban_rural)",
+        help="ZOD dataset root (required for most variants)",
     )
     parser.add_argument(
         "--zod-version", type=str, default="full", choices=["full", "mini"],
@@ -298,61 +664,119 @@ def main() -> None:
     parser.add_argument(
         "--variants", nargs="+", default=ALL_VARIANTS, choices=ALL_VARIANTS,
     )
+    parser.add_argument(
+        "--generate-bootstraps", action="store_true",
+        help="Generate bootstrap ID files (city_day and city_mixed)",
+    )
+    parser.add_argument(
+        "--generate-shared-manifests", action="store_true",
+        help="Generate bootstrap-prefixed manifests for all combos",
+    )
+    parser.add_argument(
+        "--bootstrap-ids", type=str, default=None,
+        help="Path to a bootstrap IDs JSON file (for single manifest gen)",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     if not (data_dir / "images").is_dir():
         raise FileNotFoundError(f"No images/ directory in {data_dir}")
 
-    variants = args.variants
+    variants: List[str] = args.variants
     zod_version = cast(ZodVersion, args.zod_version)
-    needs_zod = any(v in variants for v in ["base", "road_type", "urban_rural"])
-    if needs_zod and not args.zod_root:
-        parser.error("--zod-root is required for 'base', 'road_type', and 'urban_rural' variants")
 
-    # Discover frames from image files
+    needs_zod = bool(set(variants) & _VARIANTS_NEEDING_ZOD)
+    if args.generate_bootstraps or args.generate_shared_manifests:
+        needs_zod = True
+    if needs_zod and not args.zod_root:
+        needed = sorted(set(variants) & _VARIANTS_NEEDING_ZOD)
+        parser.error(
+            f"--zod-root is required for variants: {', '.join(needed)}"
+            if needed else "--zod-root is required for bootstrap/shared manifests"
+        )
+
     frame_ids = sorted(p.stem for p in (data_dir / "images").glob("*.jpg"))
     print(f"Found {len(frame_ids)} images in {data_dir / 'images'}")
 
-    # Load ZOD metadata once (needed for base + metadata variants)
-    zod_meta = None
+    zod_meta: ZodMeta | None = None
     if needs_zod:
+        assert args.zod_root is not None
         zod_meta = _load_zod_metadata(frame_ids, args.zod_root, zod_version)
 
-    # Base manifest
+    # -- Base manifest --------------------------------------------------------
+
     if "base" in variants:
-        if zod_meta is None:
-            raise RuntimeError("Internal error: zod metadata not loaded for base variant.")
+        assert zod_meta is not None
         manifest = build_base(data_dir, frame_ids, zod_meta, zod_version)
         save_manifest(data_dir / "manifest.json", manifest)
-        print(f"[base] wrote: {data_dir / 'manifest.json'}")
+        print(f"  -> {data_dir / 'manifest.json'}")
     else:
         manifest_path = data_dir / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(
-                f"{manifest_path} not found. Run with --variants base first."
+                f"{manifest_path} not found.  Run with --variants base first."
             )
         manifest = load_manifest(manifest_path)
 
-    # Ordering variants
-    if "temporal" in variants:
-        m = build_temporal(manifest)
-        save_manifest(data_dir / "manifest_temporal.json", m)
-        print(f"[temporal] wrote: {data_dir / 'manifest_temporal.json'}")
+    # -- Ordering variants ----------------------------------------------------
 
-    if "road_type" in variants:
-        if zod_meta is None:
-            raise RuntimeError("Internal error: zod metadata not loaded for road_type variant.")
-        m = build_road_type(manifest, zod_meta)
-        save_manifest(data_dir / "manifest_road_type.json", m)
-        print(f"[road_type] wrote: {data_dir / 'manifest_road_type.json'}")
+    builders: Dict[str, Callable[[], Dict[str, Any]]] = {
+        "temporal": lambda: build_temporal(manifest),
+    }
+    if zod_meta is not None:
+        zm = zod_meta
+        builders.update({
+            "road_type": lambda: build_road_type(manifest, zm),
+            "road_type_reverse": lambda: build_road_type_reverse(manifest, zm),
+            "road_type_time": lambda: build_road_type_time(manifest, zm),
+            "conditions": lambda: build_conditions(manifest, zm),
+            "urban_rural": lambda: build_urban_rural(manifest, zm),
+        })
 
-    if "urban_rural" in variants:
-        if zod_meta is None:
-            raise RuntimeError("Internal error: zod metadata not loaded for urban_rural variant.")
-        m = build_urban_rural(manifest, zod_meta)
-        save_manifest(data_dir / "manifest_urban_rural.json", m)
-        print(f"[urban_rural] wrote: {data_dir / 'manifest_urban_rural.json'}")
+    for name in variants:
+        if name == "base" or name not in builders:
+            continue
+        filename = _VARIANT_FILENAMES[name]
+        m = builders[name]()
+        save_manifest(data_dir / filename, m)
+        print(f"  -> {data_dir / filename}")
+
+    # -- Bootstrap ID generation ----------------------------------------------
+
+    if args.generate_bootstraps:
+        for preset_name, preset_kwargs in _BOOTSTRAP_PRESETS.items():
+            ids = build_bootstrap_set(manifest, **preset_kwargs)
+            out_path = data_dir / f"bootstrap_{preset_name}.json"
+            with out_path.open("w") as f:
+                json.dump(ids, f, indent=2)
+            print(f"  -> {out_path} ({len(ids)} IDs)")
+
+    # -- Bootstrap-prefixed manifests -----------------------------------------
+
+    if args.generate_shared_manifests:
+        assert zod_meta is not None
+        zm = zod_meta
+        for boot_preset, ordering, out_name in _BOOTSTRAP_ORDERING_COMBOS:
+            boot_path = data_dir / f"bootstrap_{boot_preset}.json"
+            if not boot_path.exists():
+                print(f"  [SKIP] {boot_path} not found -- "
+                      f"run with --generate-bootstraps first")
+                continue
+            with boot_path.open("r") as f:
+                boot_ids: List[str] = json.load(f)
+
+            block_order, bucket_fn, strategy_name = _get_ordering_params(
+                ordering, zm,
+            )
+            m = _build_block_manifest_with_bootstrap(
+                manifest,
+                block_order=block_order,
+                bucket_fn=bucket_fn,
+                strategy_name=strategy_name,
+                bootstrap_ids=boot_ids,
+            )
+            save_manifest(data_dir / out_name, m)
+            print(f"  -> {data_dir / out_name}")
 
 
 if __name__ == "__main__":

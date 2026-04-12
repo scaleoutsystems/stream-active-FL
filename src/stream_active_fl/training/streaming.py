@@ -153,13 +153,13 @@ def collect_embeddings(
     data_loader: DataLoader,
     device: torch.device,
     progress_bar: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, int]:
+) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
     """
     Collect backbone embeddings for all frames in a DataLoader.
 
     Runs a forward pass through each batch, extracting embeddings via
-    model.get_embedding(). Computes the mean and covariance of the
-    embedding distribution.
+    model.get_embedding(). Computes the mean, covariance, and per-frame
+    Mahalanobis distances of the embedding distribution.
 
     Args:
         model: The detection model with a get_embedding() method.
@@ -168,8 +168,9 @@ def collect_embeddings(
         progress_bar: Show progress bar.
 
     Returns:
-        (mean, cov, count): Mean vector (D,), covariance matrix (D, D),
-        and number of embeddings used.
+        (mean, cov, count, scores): Mean vector (D,), covariance matrix
+        (D, D), number of embeddings, and per-frame Mahalanobis distances
+        (N,) used for bootstrap-calibrated threshold initialisation.
     """
     was_training = model.training
     model.eval()
@@ -189,13 +190,19 @@ def collect_embeddings(
     if was_training:
         model.train()
 
-    embeddings = torch.cat(all_embeddings, dim=0)  # (N, D)
+    embeddings = torch.cat(all_embeddings, dim=0).float()  # (N, D)
 
     mean = embeddings.mean(dim=0)
     centered = embeddings - mean.unsqueeze(0)
     cov = (centered.T @ centered) / max(len(embeddings) - 1, 1)
 
-    return mean, cov, int(len(embeddings))
+    reg = 1e-5 * torch.eye(cov.shape[0])
+    cov_inv = torch.linalg.inv(cov + reg)
+    scores = torch.sqrt(
+        (centered @ cov_inv * centered).sum(dim=1)
+    )  # (N,) Mahalanobis distances
+
+    return mean, cov, int(len(embeddings)), scores
 
 
 # =============================================================================
@@ -480,6 +487,51 @@ def train_on_stream(
     # Final partial-buffer flush to avoid dropping accepted tail items.
     if len(training_buffer) > 0:
         _train_on_current_buffer()
+
+    # End-of-stream: log any items since the last checkpoint and always
+    # run a final evaluation so that the CSV files cover the full stream.
+    if metrics_logger is not None:
+        has_unlogged_items = (
+            items_processed % metrics_logger.checkpoint_interval != 0
+        )
+        last_checkpoint_was_eval = (
+            checkpoint_idx > 0
+            and checkpoint_idx % eval_every_n_checkpoints == 0
+        )
+
+        if has_unlogged_items:
+            checkpoint_idx += 1
+            filter_stats = filter_policy.get_stats()
+            buffer_stats = training_buffer.get_stats()
+            novelty_stats = (
+                novelty_tracker.get_stats() if novelty_tracker else None
+            )
+            checkpoint_loss = (
+                (running_train_loss / train_loss_steps)
+                if train_loss_steps > 0
+                else None
+            )
+            metrics_logger.log_checkpoint(
+                checkpoint_idx, optimizer_steps, filter_stats, buffer_stats,
+                novelty_stats, avg_train_loss=checkpoint_loss,
+            )
+            selection_stats = filter_policy.get_selection_stats()
+            metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)
+
+        if eval_fn is not None and (
+            has_unlogged_items or not last_checkpoint_was_eval
+        ):
+            eval_metrics = eval_fn(model)
+            metrics_logger.log_evaluation(checkpoint_idx, eval_metrics)
+            current_mAP = eval_metrics.get("mAP", 0.0)
+            if current_mAP > best_eval_mAP:
+                best_eval_mAP = current_mAP
+                best_eval_checkpoint = checkpoint_idx
+                if best_model_dir is not None:
+                    torch.save(
+                        {"model_state_dict": model.state_dict()},
+                        best_model_dir / "best_model.pt",
+                    )
 
     return StreamingTrainResult(
         items_processed=items_processed,

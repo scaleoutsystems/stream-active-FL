@@ -1,12 +1,11 @@
 # Offline baseline: multi-epoch shuffled training on all frames (performance ceiling)
 
-# Paths
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/offline/baseline"
 
 # Model / classes
 num_classes: 11
-target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600

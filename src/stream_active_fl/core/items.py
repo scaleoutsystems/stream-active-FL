@@ -25,7 +25,7 @@ class StreamItem:
         annotations: Detection targets with "boxes" (FloatTensor[N, 4] xyxy)
             and "labels" (Int64Tensor[N], 1-indexed with 0 reserved for
             background).
-        categories: Set of category *names* present in this frame (e.g.
+        categories: Set of category names present in this frame (e.g.
             {"Vehicle", "Pedestrian"}). Used by the NoveltyTracker to
             decide whether a frame introduces a previously-unseen class.
         metadata: Dict with provenance info (frame_id, global_idx, etc.).

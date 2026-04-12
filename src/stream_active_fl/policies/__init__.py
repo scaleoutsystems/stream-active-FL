@@ -17,7 +17,7 @@ Factory:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import torch
 
@@ -38,6 +38,8 @@ def create_filter_policy(
     bootstrap_mean: Optional[torch.Tensor] = None,
     bootstrap_cov: Optional[torch.Tensor] = None,
     bootstrap_count: int = 0,
+    scoring_model: Optional[torch.nn.Module] = None,
+    bootstrap_scores: Optional[List[float]] = None,
 ) -> FilterPolicy:
     """
     Create a filter policy from an experiment config dataclass.
@@ -51,6 +53,13 @@ def create_filter_policy(
             used by distribution-based policy in mahalanobis mode).
         bootstrap_count: Number of bootstrap samples used to compute
             bootstrap_mean/bootstrap_cov.
+        scoring_model: Optional frozen model snapshot for computing
+            embeddings.  When provided, the distribution-based policy
+            uses this model (not the live training model) so that
+            distance scores remain in a stable embedding space.
+        bootstrap_scores: Per-frame Mahalanobis distances computed over
+            the bootstrap data.  When provided, used to calibrate the
+            threshold directly (no warmup needed).
 
     Returns:
         Configured FilterPolicy instance.
@@ -73,11 +82,17 @@ def create_filter_policy(
             bootstrap_count=bootstrap_count,
             mode=config.distribution_mode,
             accept_fraction=config.accept_fraction,
+            budget_mode=getattr(config, "budget_mode", "adaptive"),
             score_window_size=config.score_window_size,
             warmup_items=config.warmup_items,
             embedding_buffer_size=config.embedding_buffer_size,
             knn_k=config.knn_k,
             update_stats=config.update_distribution_stats,
+            threshold_percentile=getattr(config, "threshold_percentile", 0.5),
+            threshold_ema_alpha=getattr(config, "threshold_ema_alpha", 0.0),
+            total_stream_items=getattr(config, "total_stream_items", 0),
+            scoring_model=scoring_model,
+            bootstrap_scores=bootstrap_scores,
         )
 
     elif config.filter_policy == "uncertainty":

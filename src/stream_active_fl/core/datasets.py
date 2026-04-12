@@ -275,7 +275,7 @@ def get_detection_augmentation(
 
 
 # =============================================================================
-# DetectionDataset (Offline — bootstrap training and validation)
+# DetectionDataset (Offline -- bootstrap training and validation)
 # =============================================================================
 
 
@@ -406,7 +406,7 @@ class DetectionDataset(Dataset):
 
 
 # =============================================================================
-# DetectionStream (Streaming — chronological single-pass)
+# DetectionStream (Streaming -- chronological single-pass)
 # =============================================================================
 
 
@@ -417,8 +417,8 @@ class DetectionStream:
     Unlike DetectionDataset which supports shuffled DataLoader access,
     this class is an iterator that produces one StreamItem at a time in the
     order frames are listed for the chosen split.  The base manifest from
-    preprocessing lists frames sorted by frame_id; ``manifest_temporal.json``
-    (from ``build_manifests.py``) reorders the training split by capture
+    preprocessing lists frames sorted by frame_id; manifest_temporal.json
+    (from build_manifests.py) reorders the training split by capture
     timestamp, which is what streaming experiment configs use by default.
 
     Args:

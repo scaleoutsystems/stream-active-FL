@@ -1,13 +1,13 @@
-# Streaming detection: random baseline (accept fixed fraction at random)
-# Compare content-based filtering vs random selection
+# Random filter baseline: city-day bootstrap, road_type ordering (city-first)
+# Bootstrap: 5k city+day frames (shared prefix in manifest)
+# Stream: city → arterial-urban → highway → arterial-rural → smaller-rural
 
-# Paths
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
-output_dir: "outputs/streaming/random_filter"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
+output_dir: "outputs/streaming/random_filter_cityday_road_type"
 
 # Model / classes
 num_classes: 11
-target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]  # null = all classes; or list e.g. ["Vehicle", "Pedestrian"]
+target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
 image_min_size: 480
 image_max_size: 1600
@@ -15,10 +15,10 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Bootstrap phase (set bootstrap_run_dir to reuse a previous bootstrap)
+# Bootstrap phase
 bootstrap_run_dir: null
-bootstrap_frames: 1000
-bootstrap_epochs: 10
+bootstrap_frames: 5000
+bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
@@ -28,7 +28,7 @@ weight_decay: 1.0e-4
 max_grad_norm: 1.0
 buffer_capacity: 32
 train_steps_per_buffer: 1
-buffer_training_mode: "mini_batch"  # "full_batch" or "mini_batch"
+buffer_training_mode: "mini_batch"
 local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
@@ -44,7 +44,7 @@ color_jitter: true
 
 # Filtering: random accept with probability accept_fraction
 filter_policy: "random"
-accept_fraction: 0.5
+accept_fraction: 0.3
 
 # Evaluation
 eval_every_n_items: 5000

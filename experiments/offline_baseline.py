@@ -169,7 +169,7 @@ class EpochLogger:
 def main(config: OfflineBaselineConfig, config_path: Path, command: str) -> None:
     start_time = datetime.now()
 
-    # Distributed setup — auto-detected via torchrun env vars
+    # Distributed setup -- auto-detected via torchrun env vars
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if distributed:
         dist.init_process_group(backend="nccl")

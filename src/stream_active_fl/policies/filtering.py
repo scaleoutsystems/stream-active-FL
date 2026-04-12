@@ -146,10 +146,10 @@ class FilterPolicy(ABC):
     ) -> float:
         """Return the adaptive threshold from a sliding window of scores.
 
-        The threshold is the ``(1 - accept_fraction)`` quantile of the
+        The threshold is the (1 - accept_fraction) quantile of the
         recent scores.  Items scoring above this threshold are accepted,
         which mechanically targets an acceptance rate of
-        ``accept_fraction``.
+        accept_fraction.
 
         Args:
             score_history: Recent scores (sliding window).
@@ -166,7 +166,7 @@ class FilterPolicy(ABC):
         """Return the accept fraction adjusted by a proportional correction.
 
         Uses the recent post-warmup decision history to detect systematic
-        deviation from the configured ``accept_fraction`` and compensate.
+        deviation from the configured accept_fraction and compensate.
         The correction is stateless (pure function of the current window)
         so it cannot wind up.
         """
@@ -280,6 +280,28 @@ class DistributionBasedPolicy(FilterPolicy):
     - "knn": Average distance to the k nearest neighbors in a stored
       buffer of recent embeddings.
 
+    To isolate domain novelty from backbone training drift, all modes
+    can use a frozen scoring model (a snapshot of the bootstrap model)
+    for embedding computation.  When scoring_model is provided, the
+    model passed to select_action is ignored for scoring -- only the
+    frozen copy is used.  This keeps scores in a stable embedding space
+    and makes distance from the bootstrap reference a genuine measure of
+    domain novelty.
+
+    Supports three budget modes:
+    - "adaptive": (default) Sliding-window quantile thresholding that
+      targets a fixed accept_fraction per window, with feedback
+      correction.  Accept rate stays near accept_fraction regardless
+      of domain.
+    - "fixed_threshold": Threshold calibrated once from warmup scores
+      and optionally tracked with a slow EMA.  When the stream enters
+      a novel domain, scores are genuinely higher → more accepts; in a
+      familiar domain, scores are lower → fewer accepts.
+      Accept rate varies freely with stream novelty.
+    - "global_budget": Same scoring and threshold as "fixed_threshold",
+      plus a hard cap: total accepts ≤
+      accept_fraction * total_stream_items.
+
     Args:
         bootstrap_mean: Mean embedding vector from bootstrap (1D tensor).
         bootstrap_cov: Covariance matrix from bootstrap (2D tensor).
@@ -288,9 +310,12 @@ class DistributionBasedPolicy(FilterPolicy):
             Used as prior weight when update_stats=True. If unknown (<=0),
             running-stat updates are disabled to avoid biased mean updates.
         mode: Distance computation mode.
-        accept_fraction: Fraction of items to accept (top percentile by
-            distance). E.g. 0.3 means accept the ~30% most distant items.
-        score_window_size: Size of the sliding window for adaptive thresholding.
+        accept_fraction: Fraction of items to accept.  Used as the per-window
+            target for "adaptive", and for computing the total budget in
+            "global_budget" mode.  Ignored for "fixed_threshold".
+        budget_mode: One of "adaptive", "fixed_threshold", "global_budget".
+        score_window_size: Size of the sliding window for adaptive thresholding
+            (used by "adaptive" mode).
         warmup_items: Accept all items unconditionally during warmup to
             build a score distribution.
         embedding_buffer_size: For mode="knn", how many recent embeddings
@@ -298,6 +323,28 @@ class DistributionBasedPolicy(FilterPolicy):
         knn_k: For mode="knn", number of nearest neighbors.
         update_stats: Whether to update running mean with accepted embeddings.
             Covariance is kept fixed to bootstrap_cov for mahalanobis mode.
+            Forced to False when a scoring_model is provided, since
+            the reference must stay in the scoring model's embedding space.
+        threshold_percentile: For "fixed_threshold" / "global_budget" modes,
+            the percentile of warmup scores used to initialise the threshold.
+            e.g. 0.5 = warmup median.
+        threshold_ema_alpha: EMA smoothing factor for threshold tracking in
+            "fixed_threshold" / "global_budget" modes.  0.0 = truly fixed
+            threshold (strongest domain signal).  Increase (e.g. 0.0001)
+            only if model-training-induced score-scale drift causes
+            acceptance to collapse over long streams.
+        total_stream_items: For "global_budget" mode, the expected total
+            number of stream items (used to compute the accept budget).
+        scoring_model: Optional frozen model for computing embeddings.
+            When provided, select_action uses this model (not the live
+            training model) so that scores remain in a stable embedding
+            space.  The caller is responsible for freezing the model
+            (eval mode, no grad).
+        bootstrap_scores: Per-frame Mahalanobis distances from the
+            bootstrap phase.  When provided for "fixed_threshold" /
+            "global_budget" modes, the threshold is calibrated directly
+            from these scores (no warmup period needed).  This makes the
+            threshold independent of stream ordering.
     """
 
     def __init__(
@@ -307,20 +354,30 @@ class DistributionBasedPolicy(FilterPolicy):
         bootstrap_count: int = 0,
         mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis",
         accept_fraction: float = 0.3,
+        budget_mode: Literal["adaptive", "fixed_threshold", "global_budget"] = "adaptive",
         score_window_size: int = 500,
         warmup_items: int = 100,
         embedding_buffer_size: int = 1000,
         knn_k: int = 10,
         update_stats: bool = True,
+        threshold_percentile: float = 0.5,
+        threshold_ema_alpha: float = 0.0,
+        total_stream_items: int = 0,
+        scoring_model: Optional[nn.Module] = None,
+        bootstrap_scores: Optional[List[float]] = None,
     ):
         super().__init__()
         if mode == "mahalanobis" and bootstrap_cov is None:
             raise ValueError("mahalanobis mode requires bootstrap_cov")
         self.mode = mode
         self.accept_fraction = accept_fraction
+        self.budget_mode = budget_mode
         self.score_window_size = score_window_size
         self.warmup_items = warmup_items
         self.knn_k = knn_k
+        self.threshold_percentile = threshold_percentile
+        self.threshold_ema_alpha = threshold_ema_alpha
+        self.total_stream_items = total_stream_items
 
         # Running statistics
         self.mean = bootstrap_mean.clone().float()
@@ -334,7 +391,7 @@ class DistributionBasedPolicy(FilterPolicy):
         # Embedding buffer for kNN
         self.embedding_buffer: deque = deque(maxlen=embedding_buffer_size)
 
-        # Sliding window for adaptive thresholding
+        # Sliding window for adaptive thresholding (used by "adaptive" mode)
         self.score_history: deque = deque(maxlen=score_window_size)
 
         # Counters
@@ -342,10 +399,39 @@ class DistributionBasedPolicy(FilterPolicy):
         self.count_accept = 0
         self.count_reject = 0
 
+        # Frozen scoring model -- if provided, all embeddings for scoring
+        # are computed through this model instead of the live training model.
+        self._scoring_model = scoring_model
+
         # Running-mean update state (prior from bootstrap stats).
+        # Forced OFF when a scoring_model is provided (the reference must
+        # stay in the scoring model's embedding space).
         self.bootstrap_count = int(max(bootstrap_count, 0))
-        self.update_stats = bool(update_stats and self.bootstrap_count > 0)
+        if scoring_model is not None:
+            self.update_stats = False
+        else:
+            self.update_stats = bool(update_stats and self.bootstrap_count > 0)
         self._n_embeddings = self.bootstrap_count
+
+        # EMA threshold for fixed_threshold / global_budget modes.
+        self._ema_threshold: float = 0.0
+        self._bootstrap_calibrated: bool = False
+
+        if (
+            bootstrap_scores is not None
+            and len(bootstrap_scores) > 0
+            and budget_mode in ("fixed_threshold", "global_budget")
+        ):
+            sorted_scores = sorted(bootstrap_scores)
+            idx = int(len(sorted_scores) * (1.0 - threshold_percentile))
+            idx = min(idx, len(sorted_scores) - 1)
+            self._ema_threshold = sorted_scores[idx]
+            self._bootstrap_calibrated = True
+
+        # Global budget (for "global_budget" mode)
+        self._budget_remaining: int = max(
+            1, int(accept_fraction * total_stream_items)
+        ) if budget_mode == "global_budget" and total_stream_items > 0 else 0
 
     def _compute_score(self, embedding: torch.Tensor) -> float:
         """Compute a distance score for a single embedding (1D tensor)."""
@@ -375,9 +461,25 @@ class DistributionBasedPolicy(FilterPolicy):
         raise ValueError(f"Unknown mode: {self.mode}")
 
     def _get_threshold(self) -> float:
+        if self.budget_mode in ("fixed_threshold", "global_budget"):
+            return self._ema_threshold
         return self._compute_adaptive_threshold(
             self.score_history, self._effective_accept_fraction(),
         )
+
+    def _calibrate_ema_threshold(self) -> None:
+        """Initialise the EMA threshold from warmup scores."""
+        if not self.score_history:
+            self._ema_threshold = 0.0
+            return
+        sorted_scores = sorted(self.score_history)
+        idx = int(len(sorted_scores) * (1.0 - self.threshold_percentile))
+        idx = min(idx, len(sorted_scores) - 1)
+        self._ema_threshold = sorted_scores[idx]
+
+    def _update_ema_threshold(self, score: float) -> None:
+        """Slowly track score-scale drift without chasing domain content."""
+        self._ema_threshold += self.threshold_ema_alpha * (score - self._ema_threshold)
 
     def _update_running_stats(self, embedding: torch.Tensor) -> None:
         """Incrementally update running mean with a new embedding."""
@@ -396,32 +498,48 @@ class DistributionBasedPolicy(FilterPolicy):
         self.items_seen += 1
 
         image = stream_item.image.to(device)
-        embedding = model.get_embedding([image]).squeeze(0).cpu()
+        scorer = self._scoring_model if self._scoring_model is not None else model
+        embedding = scorer.get_embedding([image]).squeeze(0).cpu()
 
         score = self._compute_score(embedding)
         self.score_history.append(score)
 
-        # Update running stats for ALL items so the mean tracks the true
-        # stream distribution, preventing the acceptance rate from drifting
-        # below the target fraction.
         if self.update_stats:
             self._update_running_stats(embedding)
 
-        meta = {"score": score, "mode": self.mode}
+        meta: Dict[str, Any] = {"score": score, "mode": self.mode, "budget_mode": self.budget_mode}
 
-        # Warmup: accept all to build score distribution
-        if self.items_seen <= self.warmup_items:
+        # Warmup: accept all to build score distribution.
+        # Skipped when threshold was pre-calibrated from bootstrap scores.
+        if not self._bootstrap_calibrated and self.items_seen <= self.warmup_items:
             self.count_accept += 1
+            if self.budget_mode == "global_budget":
+                self._budget_remaining -= 1
             self.selection_tracker.record("accept", stream_item.categories)
+            if self.items_seen == self.warmup_items and self.budget_mode in ("fixed_threshold", "global_budget"):
+                self._calibrate_ema_threshold()
             return ("accept", meta)
+
+        # Slowly track score-scale drift for EMA-threshold modes
+        if self.budget_mode in ("fixed_threshold", "global_budget"):
+            self._update_ema_threshold(score)
 
         threshold = self._get_threshold()
         meta["threshold"] = threshold
+
+        # Global budget: reject everything once budget exhausted
+        if self.budget_mode == "global_budget" and self._budget_remaining <= 0:
+            self.count_reject += 1
+            self._recent_decisions.append(0)
+            self.selection_tracker.record("reject", stream_item.categories)
+            return ("reject", meta)
 
         if score >= threshold:
             self.count_accept += 1
             self._recent_decisions.append(1)
             self.selection_tracker.record("accept", stream_item.categories)
+            if self.budget_mode == "global_budget":
+                self._budget_remaining -= 1
             return ("accept", meta)
         else:
             self.count_reject += 1
@@ -431,18 +549,28 @@ class DistributionBasedPolicy(FilterPolicy):
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.count_accept + self.count_reject
-        return {
+        stats: Dict[str, Any] = {
             "count_accept": self.count_accept,
             "count_reject": self.count_reject,
             "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
             "mode": self.mode,
+            "budget_mode": self.budget_mode,
             "accept_fraction": self.accept_fraction,
-            "effective_accept_fraction": self._effective_accept_fraction(),
             "bootstrap_count": self.bootstrap_count,
             "update_stats_enabled": self.update_stats,
+            "frozen_scoring_model": self._scoring_model is not None,
             "current_threshold": self._get_threshold(),
+            "bootstrap_calibrated": self._bootstrap_calibrated,
         }
+        if self.budget_mode == "adaptive":
+            stats["effective_accept_fraction"] = self._effective_accept_fraction()
+        if self.budget_mode in ("fixed_threshold", "global_budget"):
+            stats["threshold_percentile"] = self.threshold_percentile
+            stats["threshold_ema_alpha"] = self.threshold_ema_alpha
+        if self.budget_mode == "global_budget":
+            stats["budget_remaining"] = self._budget_remaining
+        return stats
 
 
 # =============================================================================

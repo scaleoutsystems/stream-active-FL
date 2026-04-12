@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import shutil
 import sys
@@ -110,9 +111,13 @@ class FederatedDetectionConfig:
     warmup_items: int = 200
     score_window_size: int = 500
     distribution_mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis"
+    budget_mode: Literal["adaptive", "fixed_threshold", "global_budget"] = "adaptive"
     embedding_buffer_size: int = 1000
     knn_k: int = 10
     update_distribution_stats: bool = True
+    threshold_percentile: float = 0.5
+    threshold_ema_alpha: float = 0.0
+    total_stream_items: int = 0
     confidence_threshold: float = 0.1
     top_k_detections: int = 5
     norm_window_size: int = 500
@@ -151,12 +156,13 @@ def _bootstrap_or_reuse(
     train_augmentation,
     device: torch.device,
     scaler: torch.cuda.amp.GradScaler,
-) -> tuple[nn.Module, Optional[torch.Tensor], Optional[torch.Tensor], int, Optional[Path]]:
+) -> tuple[nn.Module, Optional[torch.Tensor], Optional[torch.Tensor], int, Optional[torch.Tensor], Optional[Path]]:
     requires_bootstrap_embeddings = (config.filter_policy == "distribution")
     bootstrap_source: Optional[Path] = None
     embedding_mean: Optional[torch.Tensor] = None
     embedding_cov: Optional[torch.Tensor] = None
     embedding_count = 0
+    bootstrap_scores: Optional[torch.Tensor] = None
 
     if config.bootstrap_run_dir:
         p = Path(config.bootstrap_run_dir)
@@ -193,6 +199,16 @@ def _bootstrap_or_reuse(
             embedding_mean = embed_data["mean"]
             embedding_cov = embed_data["cov"]
             embedding_count = int(embed_data["count"])
+            if "scores" in embed_data:
+                bootstrap_scores = embed_data["scores"]
+                assert bootstrap_scores is not None
+                print(f"Loaded bootstrap scores: {bootstrap_scores.shape}")
+            else:
+                print(
+                    "WARNING: bootstrap_embeddings.pt has no 'scores' key — "
+                    "threshold will be calibrated from warmup instead. "
+                    "Re-run bootstrap to enable bootstrap-calibrated thresholds."
+                )
             assert embedding_mean is not None and embedding_cov is not None
             print(
                 "Loaded embeddings:"
@@ -203,7 +219,7 @@ def _bootstrap_or_reuse(
         if requires_bootstrap_embeddings:
             shutil.copy(embed_path, run_dir / "bootstrap_embeddings.pt")
         (run_dir / "bootstrap_source.txt").write_text(str(bootstrap_source))
-        return model, embedding_mean, embedding_cov, embedding_count, bootstrap_source
+        return model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, bootstrap_source
 
     print("\n" + "=" * 60)
     print("Phase 1: Bootstrap Training")
@@ -302,17 +318,25 @@ def _bootstrap_or_reuse(
             worker_init_fn=worker_init_fn,
             pin_memory=device.type == "cuda",
         )
-        embedding_mean, embedding_cov, embedding_count = collect_embeddings(model, embed_loader, device)
+        embedding_mean, embedding_cov, embedding_count, bootstrap_scores = (
+            collect_embeddings(model, embed_loader, device)
+        )
         torch.save(
-            {"mean": embedding_mean, "cov": embedding_cov, "count": embedding_count},
+            {
+                "mean": embedding_mean,
+                "cov": embedding_cov,
+                "count": embedding_count,
+                "scores": bootstrap_scores,
+            },
             run_dir / "bootstrap_embeddings.pt",
         )
         print(
             f"Embedding stats collected: mean {embedding_mean.shape}, "
-            f"cov {embedding_cov.shape}, n={embedding_count}"
+            f"cov {embedding_cov.shape}, n={embedding_count}, "
+            f"scores {bootstrap_scores.shape}"
         )
 
-    return model, embedding_mean, embedding_cov, embedding_count, None
+    return model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, None
 
 
 def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> None:
@@ -347,7 +371,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         )
 
     bootstrap_start = time.time()
-    global_model, embedding_mean, embedding_cov, embedding_count, bootstrap_source = _bootstrap_or_reuse(
+    global_model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, bootstrap_source = _bootstrap_or_reuse(
         config=config,
         run_dir=run_dir,
         manifest_path=manifest_path,
@@ -395,13 +419,26 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         s, e = partitions[cid]
         print(f"  client_{cid}: [{s}, {e}) size={e - s}")
 
-    # Per-client policy state (kept across rounds for threshold/history continuity)
+    # Frozen scoring model -- snapshot of bootstrap model for stable novelty scores.
+    scoring_model: Optional[nn.Module] = None
+    if config.filter_policy == "distribution":
+        scoring_model = copy.deepcopy(global_model)
+        scoring_model.eval()
+        for p in scoring_model.parameters():
+            p.requires_grad = False
+        print("Created frozen scoring model for stable novelty measurement")
+
+    # Per-client policy state (kept across rounds for threshold/history continuity).
+    # bootstrap_scores are converted to a plain list for the filter constructor.
+    _bs_list = bootstrap_scores.tolist() if bootstrap_scores is not None else None
     client_policies = [
         create_filter_policy(
             config,
             bootstrap_mean=embedding_mean,
             bootstrap_cov=embedding_cov,
             bootstrap_count=embedding_count,
+            scoring_model=scoring_model,
+            bootstrap_scores=_bs_list,
         )
         for _ in range(config.num_clients)
     ]
