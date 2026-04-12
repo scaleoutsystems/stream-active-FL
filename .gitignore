@@ -10,6 +10,7 @@ build/
 .eggs/
 
 # Virtual environments
+.venv
 .venv/
 venv/
 env/
@@ -63,5 +64,5 @@ slurm/local/
 
 # Misc
 nohup.out
-notebooks/
+notebooks/archive/
 notes/
