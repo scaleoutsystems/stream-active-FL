@@ -1,8 +1,9 @@
-# Federated: random filter baseline with city-day bootstrap, road_type ordering
-# Each client randomly accepts 30% of frames → bandwidth savings without intelligence
+# Federated: distribution threshold with city-mixed bootstrap, REVERSE ordering
+# Client 0 starts with rural (most different from bootstrap), Client 3 ends with city
+# Compares bootstrap sensitivity + ordering vs city-day variant
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/federated/fed_random_filter_cityday_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_reverse.json"
+output_dir: "outputs/federated/fed_dist_thresh_citymix_reverse_p10"
 
 # Model / classes
 num_classes: 11
@@ -43,9 +44,17 @@ augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: random accept with probability accept_fraction
-filter_policy: "random"
-accept_fraction: 0.55
+# Filtering: distribution-based, frozen-reference threshold
+filter_policy: "distribution"
+budget_mode: "fixed_threshold"
+threshold_percentile: 0.10
+threshold_ema_alpha: 0.0
+warmup_items: 500
+score_window_size: 500
+distribution_mode: "mahalanobis"
+embedding_buffer_size: 1000
+knn_k: 10
+update_distribution_stats: false
 
 # Evaluation
 eval_every_n_rounds: 1

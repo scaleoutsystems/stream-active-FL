@@ -1,8 +1,8 @@
-# Federated: random filter baseline with city-day bootstrap, road_type ordering
+# Federated: random filter baseline with city-mixed bootstrap, road_type ordering
 # Each client randomly accepts 30% of frames → bandwidth savings without intelligence
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/federated/fed_random_filter_cityday_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_road_type.json"
+output_dir: "outputs/federated/fed_random_filter_citymix_road_type"
 
 # Model / classes
 num_classes: 11

@@ -44,7 +44,7 @@ color_jitter: true
 
 # Filtering: random accept with probability accept_fraction
 filter_policy: "random"
-accept_fraction: 0.3
+accept_fraction: 0.55
 
 # Evaluation
 eval_every_n_items: 5000

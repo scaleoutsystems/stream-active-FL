@@ -1,8 +1,9 @@
-# Federated: random filter baseline with city-day bootstrap, road_type ordering
-# Each client randomly accepts 30% of frames → bandwidth savings without intelligence
+# No filter baseline: city-mixed bootstrap, road_type ordering (city-first)
+# Bootstrap: 5k city frames (proportional day/night/twilight mix, shared prefix)
+# Stream: city → arterial-urban → highway → arterial-rural → smaller-rural
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/federated/fed_random_filter_cityday_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_road_type.json"
+output_dir: "outputs/streaming/no_filter_citymix_road_type"
 
 # Model / classes
 num_classes: 11
@@ -14,20 +15,14 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Shared bootstrap
+# Bootstrap phase
 bootstrap_run_dir: null
 bootstrap_frames: 5000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
-# Federated setup
-num_clients: 4
-num_rounds: 11
-local_items_per_round: 2000
-partition_strategy: "contiguous"
-
-# Local streaming training
+# Streaming phase
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
@@ -38,20 +33,23 @@ local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
+# Streaming LR schedule (linear warmup + cosine decay)
+streaming_lr_warmup_items: 1000
+streaming_lr_min_factor: 0.1
+
 # Augmentation
 augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: random accept with probability accept_fraction
-filter_policy: "random"
-accept_fraction: 0.55
+# Filtering
+filter_policy: "none"
 
 # Evaluation
-eval_every_n_rounds: 1
+eval_every_n_items: 5000
+checkpoint_interval: 1000
 score_threshold: 0.3
 min_box_area: 64.0
-val_frame_limit: null
 bootstrap_smoke_check_frames: 200
 bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005

@@ -1,8 +1,8 @@
-# Federated: random filter baseline with city-day bootstrap, road_type ordering
-# Each client randomly accepts 30% of frames → bandwidth savings without intelligence
+# Federated: no filter baseline with city-mixed bootstrap, road_type ordering
+# All frames accepted → full bandwidth, no intelligent selection
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/federated/fed_random_filter_cityday_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_road_type.json"
+output_dir: "outputs/federated/fed_no_filter_citymix_road_type"
 
 # Model / classes
 num_classes: 11
@@ -43,9 +43,8 @@ augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: random accept with probability accept_fraction
-filter_policy: "random"
-accept_fraction: 0.55
+# Filtering
+filter_policy: "none"
 
 # Evaluation
 eval_every_n_rounds: 1
