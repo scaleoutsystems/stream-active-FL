@@ -1,5 +1,5 @@
 # Federated: distribution threshold with city-mixed bootstrap, REVERSE ordering
-# Client 0 starts with rural (most different from bootstrap), Client 3 ends with city
+# Domain-aligned partitioning: Client 0 = city, Client 1 = arterial-urban, Client 2 = highway, Client 3 = rural
 # Compares bootstrap sensitivity + ordering vs city-day variant
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_reverse.json"
@@ -26,7 +26,12 @@ bootstrap_lr: 4.0e-4
 num_clients: 4
 num_rounds: 11
 local_items_per_round: 2000
-partition_strategy: "contiguous"
+partition_strategy: "domain_aligned"
+domain_client_groups:
+  - ["city"]
+  - ["arterial-urban"]
+  - ["highway"]
+  - ["smaller-rural", "arterial-rural"]
 
 # Local streaming training
 streaming_lr: 1.0e-4

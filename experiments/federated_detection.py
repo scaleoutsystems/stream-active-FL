@@ -39,6 +39,7 @@ from stream_active_fl.core import (
     get_detection_augmentation,
     get_detection_transforms,
     partition_frames,
+    partition_frames_by_domain,
 )
 from stream_active_fl.evaluation import evaluate_detection
 from stream_active_fl.experiment import (
@@ -85,8 +86,12 @@ class FederatedDetectionConfig:
     num_clients: int = 4
     num_rounds: int = 10
     local_items_per_round: int = 2000
-    # "uniform" currently aliases "contiguous" (kept for backward compatibility).
-    partition_strategy: Literal["contiguous", "uniform"] = "contiguous"
+    partition_strategy: Literal["contiguous", "uniform", "domain_aligned"] = "contiguous"
+    # Required when partition_strategy is "domain_aligned".
+    # Each inner list names the manifest blocks assigned to that client.
+    # Length must equal num_clients.  Blocks in each group must be adjacent
+    # in the manifest's block_order.
+    domain_client_groups: Optional[List[List[str]]] = None
 
     # Local streaming training
     streaming_lr: float = 1e-4
@@ -408,11 +413,42 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         verbose=False,
     )
     stream_frames = len(train_stream_for_len)
-    partitions = partition_frames(
-        num_frames=stream_frames,
-        num_clients=config.num_clients,
-        strategy=config.partition_strategy,
-    )
+
+    if config.partition_strategy == "domain_aligned":
+        import json
+        with open(manifest_path) as _mf:
+            _manifest_data = json.load(_mf)
+        _ordering = _manifest_data.get("ordering", {})
+        _block_order = _ordering.get("block_order", [])
+        _block_sizes = _ordering.get("block_sizes", {})
+        if not _block_order or not _block_sizes:
+            raise ValueError(
+                "domain_aligned partitioning requires a manifest with "
+                "ordering.block_order and ordering.block_sizes"
+            )
+        if config.domain_client_groups is None:
+            raise ValueError(
+                "domain_client_groups must be set when "
+                "partition_strategy='domain_aligned'"
+            )
+        if len(config.domain_client_groups) != config.num_clients:
+            raise ValueError(
+                f"domain_client_groups has {len(config.domain_client_groups)} "
+                f"entries but num_clients={config.num_clients}"
+            )
+        partitions = partition_frames_by_domain(
+            block_order=_block_order,
+            block_sizes=_block_sizes,
+            client_groups=config.domain_client_groups,
+        )
+        print(f"\nDomain-aligned partitioning ({len(_block_order)} blocks -> "
+              f"{config.num_clients} clients)")
+    else:
+        partitions = partition_frames(
+            num_frames=stream_frames,
+            num_clients=config.num_clients,
+            strategy=config.partition_strategy,
+        )
 
     print("\nClient partitions (post-bootstrap stream indices):")
     for cid in range(config.num_clients):

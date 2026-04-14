@@ -1,4 +1,5 @@
 # Federated: distribution threshold with city-mixed bootstrap, conditions (weather) ordering
+# Domain-aligned partitioning: Client 0 = clear, Client 1 = cloudy+fog, Client 2 = rain/wet, Client 3 = snow
 # Tests filter behaviour along the weather-based domain axis in federated setting
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_conditions.json"
@@ -25,7 +26,12 @@ bootstrap_lr: 4.0e-4
 num_clients: 4
 num_rounds: 11
 local_items_per_round: 2000
-partition_strategy: "contiguous"
+partition_strategy: "domain_aligned"
+domain_client_groups:
+  - ["clear"]
+  - ["cloudy", "fog"]
+  - ["rain_wet"]
+  - ["snow"]
 
 # Local streaming training
 streaming_lr: 1.0e-4

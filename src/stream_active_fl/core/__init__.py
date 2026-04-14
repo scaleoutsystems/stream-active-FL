@@ -36,7 +36,7 @@ from .datasets import (
     get_detection_transforms,
 )
 from .items import StreamItem
-from .partitioning import partition_frames
+from .partitioning import partition_frames, partition_frames_by_domain
 
 __all__ = [
     "CATEGORY_ID_TO_NAME",
@@ -45,6 +45,7 @@ __all__ = [
     "ClassMapping",
     "build_class_mapping",
     "partition_frames",
+    "partition_frames_by_domain",
     "DetectionAugmentation",
     "DetectionDataset",
     "DetectionStream",

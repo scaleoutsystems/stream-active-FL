@@ -1,6 +1,5 @@
 # Federated: distribution threshold with city-day bootstrap, road_type ordering
-# 4 clients with contiguous partitioning → each client gets a different domain
-# Client 0: city, Client 1: city→art-urban, Client 2: art-urban→highway→art-rural, Client 3: art-rural→sm-rural
+# Domain-aligned partitioning: Client 0 = city, Client 1 = arterial-urban, Client 2 = highway, Client 3 = rural
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
 output_dir: "outputs/federated/fed_dist_thresh_cityday_road_type_p10"
@@ -26,7 +25,12 @@ bootstrap_lr: 4.0e-4
 num_clients: 4
 num_rounds: 11
 local_items_per_round: 2000
-partition_strategy: "contiguous"
+partition_strategy: "domain_aligned"
+domain_client_groups:
+  - ["city"]
+  - ["arterial-urban"]
+  - ["highway"]
+  - ["arterial-rural", "smaller-rural"]
 
 # Local streaming training
 streaming_lr: 1.0e-4
