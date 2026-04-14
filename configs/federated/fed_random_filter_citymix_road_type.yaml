@@ -24,7 +24,7 @@ bootstrap_lr: 4.0e-4
 
 # Federated setup
 num_clients: 4
-num_rounds: 11
+num_rounds: 20
 local_items_per_round: 2000
 partition_strategy: "domain_aligned"
 domain_client_groups:
