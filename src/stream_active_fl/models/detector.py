@@ -45,8 +45,8 @@ class Detector(nn.Module):
         self,
         num_classes: int = 11,
         trainable_backbone_layers: int = 0,
-        image_min_size: int = 720,
-        image_max_size: int = 1280,
+        image_min_size: int = 480,
+        image_max_size: int = 1600,
         pretrained_backbone: bool = True,
         pretrained_detector: bool = False,
     ):
