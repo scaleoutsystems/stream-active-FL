@@ -2,7 +2,7 @@
 Client partitioning for federated learning simulation.
 
 Supports two strategies:
-  - contiguous: equal-sized consecutive slices (original behaviour).
+  - contiguous: equal-sized consecutive slices (original behavior).
   - domain_aligned: each client receives one or more named domain
     blocks from the manifest, giving every client a coherent deployment
     environment (e.g. city, suburban, highway, rural).
@@ -75,7 +75,7 @@ def partition_frames_by_domain(
 
     Returns:
         Dict mapping client_id -> (start_idx, end_idx) half-open range
-        (same contract as :func:`partition_frames`).
+        (same contract as partition_frames).
 
     Raises:
         ValueError: If a block name is unknown, blocks within a group are

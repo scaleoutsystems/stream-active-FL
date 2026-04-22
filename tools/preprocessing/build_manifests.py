@@ -20,6 +20,10 @@ Outputs (all written to <data-dir>/):
   manifest_road_type_time.json   Compound blocks: road_type x time_of_day
   manifest_conditions.json       Blocks by weather / road-surface condition
   manifest_urban_rural.json      Coarse 3-way grouping (urban | rural | highway)
+  manifest_cityday_curated.json  13-block curated sequence anchored to a
+                                 city_day bootstrap: weather shifts within
+                                 city_day -> illumination -> road type
+                                 (urban -> highway -> rural)
 
 Usage:
 
@@ -445,6 +449,107 @@ def build_urban_rural(
     )
 
 
+# ---------------------------------------------------------------------------
+# Curated sequence (city_day anchor)
+# ---------------------------------------------------------------------------
+
+# Intended block order for the cityday_curated ordering.  Designed to
+# stream from "closest to a city_day bootstrap" toward "furthest from it",
+# with distinct weather shifts (2-4), illumination shifts (5-6), a
+# road-type shift within urban (7-8), a strong road-type shift to highway
+# (9-10), and a final rural tail (11-13).  Block counts (train frames,
+# pre-bootstrap removal) taken from the ZOD full-version manifest:
+#
+#     city_day_cloudy          ~22.9k
+#     city_day_clear           ~7.6k
+#     city_day_rain_wet        ~7.1k
+#     city_day_snow            ~1.0k
+#     city_twilight            ~1.1k
+#     city_night               ~5.3k
+#     arterial-urban_day       ~14.8k
+#     arterial-urban_twi-night ~6.8k
+#     highway_day              ~6.9k
+#     highway_twi-night        ~2.9k
+#     arterial-rural_day       ~5.9k
+#     arterial-rural_twi-night ~3.1k
+#     smaller-rural_all        ~4.6k
+#
+# Every block has >= 1000 frames so accept-rate statistics within a block
+# are stable; the sequence gives ~13 intentional domain shifts across
+# ~88k stream frames (after the 2000-frame city_day bootstrap).
+CITYDAY_CURATED_ORDER: List[str] = [
+    "city_day_cloudy",
+    "city_day_clear",
+    "city_day_rain_wet",
+    "city_day_snow",
+    "city_twilight",
+    "city_night",
+    "arterial-urban_day",
+    "arterial-urban_twi-night",
+    "highway_day",
+    "highway_twi-night",
+    "arterial-rural_day",
+    "arterial-rural_twi-night",
+    "smaller-rural_all",
+]
+
+
+def _cityday_curated_bucket_from_meta(
+    road_type: str, time_of_day: str, weather_bucket: str,
+) -> str:
+    """Map ZOD fields to one of the curated block labels (or "other").
+
+    Folding rule: fog is merged into cloudy within the city_day weather
+    buckets (both are low-contrast overcast conditions; ZOD has only
+    ~12 city-day-fog frames so keeping fog as its own block would add
+    noise rather than a meaningful domain shift).
+    """
+    rt = road_type or "unknown"
+    tod = time_of_day or "unknown"
+    wb = "cloudy" if weather_bucket == "fog" else weather_bucket
+    if rt == "city":
+        if tod == "day":
+            return f"city_day_{wb}"
+        if tod == "twilight":
+            return "city_twilight"
+        return "city_night"  # night or unknown-tod city
+    if rt == "arterial-urban":
+        return "arterial-urban_day" if tod == "day" else "arterial-urban_twi-night"
+    if rt == "highway":
+        return "highway_day" if tod == "day" else "highway_twi-night"
+    if rt == "arterial-rural":
+        return "arterial-rural_day" if tod == "day" else "arterial-rural_twi-night"
+    if rt == "smaller-rural":
+        return "smaller-rural_all"
+    return "other"
+
+
+def _cityday_curated_bucket(f: Dict[str, Any], zod_meta: ZodMeta) -> str:
+    m = zod_meta[f["frame_id"]]
+    return _cityday_curated_bucket_from_meta(
+        m.get("road_type", ""),
+        m.get("time_of_day", ""),
+        _weather_bucket(m.get("scraped_weather", ""), m.get("road_condition", "")),
+    )
+
+
+def build_cityday_curated(
+    manifest: Dict[str, Any],
+    zod_meta: ZodMeta,
+) -> Dict[str, Any]:
+    """Group train frames into the 13-block cityday_curated sequence.
+
+    Intended to be consumed alongside a city_day bootstrap so the
+    bootstrap frames are drawn from the first block's natural domain.
+    """
+    return _build_block_manifest(
+        manifest,
+        block_order=CITYDAY_CURATED_ORDER,
+        bucket_fn=lambda f: _cityday_curated_bucket(f, zod_meta),
+        strategy_name="cityday_curated_blocks",
+    )
+
+
 # =============================================================================
 # Bootstrap ID generation
 # =============================================================================
@@ -584,12 +689,12 @@ def _build_block_manifest_with_bootstrap(
 
 ALL_VARIANTS = [
     "base", "temporal", "road_type", "road_type_reverse",
-    "road_type_time", "conditions", "urban_rural",
+    "road_type_time", "conditions", "urban_rural", "cityday_curated",
 ]
 
 _VARIANTS_NEEDING_ZOD = {
     "base", "road_type", "road_type_reverse", "road_type_time",
-    "conditions", "urban_rural",
+    "conditions", "urban_rural", "cityday_curated",
 }
 
 _VARIANT_FILENAMES: Dict[str, str] = {
@@ -599,22 +704,39 @@ _VARIANT_FILENAMES: Dict[str, str] = {
     "road_type_time": "manifest_road_type_time.json",
     "conditions": "manifest_conditions.json",
     "urban_rural": "manifest_urban_rural.json",
+    "cityday_curated": "manifest_cityday_curated.json",
 }
 
 
+# Bootstrap presets (road_type / time_of_day selection).  The n key is
+# overridden at runtime by the --bootstrap-n CLI flag; the value below
+# is only the legacy default.
 _BOOTSTRAP_PRESETS: Dict[str, Dict[str, Any]] = {
-    "city_day": {"road_type": "city", "time_of_day": "day", "n": 5000},
-    "city_mixed": {"road_type": "city", "time_of_day": None, "n": 5000},
+    "city_day": {"road_type": "city", "time_of_day": "day"},
+    "city_mixed": {"road_type": "city", "time_of_day": None},
 }
 
+# (bootstrap_preset, ordering_variant, output_filename_stem).
+# The stem is extended with _boot<N> when the bootstrap size is not the
+# legacy 5000-frame default, so alternative sizes do not clobber existing
+# manifests referenced by older runs.
 _BOOTSTRAP_ORDERING_COMBOS: List[Tuple[str, str, str]] = [
-    # (bootstrap_preset, ordering_variant, output_filename)
-    ("city_day", "road_type", "manifest_cityday_road_type.json"),
-    ("city_day", "road_type_reverse", "manifest_cityday_reverse.json"),
-    ("city_mixed", "road_type", "manifest_citymix_road_type.json"),
-    ("city_mixed", "road_type_reverse", "manifest_citymix_reverse.json"),
-    ("city_mixed", "conditions", "manifest_citymix_conditions.json"),
+    ("city_day", "road_type", "manifest_cityday_road_type"),
+    ("city_day", "road_type_reverse", "manifest_cityday_reverse"),
+    ("city_day", "cityday_curated", "manifest_cityday_curated"),
+    ("city_mixed", "road_type", "manifest_citymix_road_type"),
+    ("city_mixed", "road_type_reverse", "manifest_citymix_reverse"),
+    ("city_mixed", "conditions", "manifest_citymix_conditions"),
 ]
+
+# Legacy bootstrap size; anything different triggers a _boot<N> suffix
+# on the generated filenames so the 5000-frame manifests keep their names.
+_LEGACY_BOOTSTRAP_N = 5000
+
+
+def _boot_suffix(bootstrap_n: int) -> str:
+    """Return an empty suffix for the legacy size, else _boot<N>."""
+    return "" if bootstrap_n == _LEGACY_BOOTSTRAP_N else f"_boot{bootstrap_n}"
 
 
 def _get_ordering_params(
@@ -642,6 +764,12 @@ def _get_ordering_params(
             ),
             "conditions_blocks",
         )
+    elif variant == "cityday_curated":
+        return (
+            CITYDAY_CURATED_ORDER,
+            lambda f: _cityday_curated_bucket(f, zod_meta),
+            "cityday_curated_blocks",
+        )
     else:
         raise ValueError(f"Unknown ordering variant: {variant}")
 
@@ -662,7 +790,14 @@ def main() -> None:
         "--zod-version", type=str, default="full", choices=["full", "mini"],
     )
     parser.add_argument(
-        "--variants", nargs="+", default=ALL_VARIANTS, choices=ALL_VARIANTS,
+        "--variants", nargs="*", default=ALL_VARIANTS, choices=ALL_VARIANTS,
+        help=(
+            "Ordering variants to (re)generate.  Pass an empty list "
+            "(--variants) together with --generate-bootstraps / "
+            "--generate-shared-manifests to regenerate only the "
+            "bootstrap files and shared manifests without touching the "
+            "ordering-only manifests."
+        ),
     )
     parser.add_argument(
         "--generate-bootstraps", action="store_true",
@@ -675,6 +810,15 @@ def main() -> None:
     parser.add_argument(
         "--bootstrap-ids", type=str, default=None,
         help="Path to a bootstrap IDs JSON file (for single manifest gen)",
+    )
+    parser.add_argument(
+        "--bootstrap-n", type=int, default=_LEGACY_BOOTSTRAP_N,
+        help=(
+            "Number of bootstrap frames to select per preset.  When "
+            f"different from the legacy {_LEGACY_BOOTSTRAP_N}, generated "
+            "bootstrap files and shared manifests get a _boot<N> suffix "
+            "so alternative sizes do not clobber existing outputs."
+        ),
     )
     args = parser.parse_args()
 
@@ -731,6 +875,7 @@ def main() -> None:
             "road_type_time": lambda: build_road_type_time(manifest, zm),
             "conditions": lambda: build_conditions(manifest, zm),
             "urban_rural": lambda: build_urban_rural(manifest, zm),
+            "cityday_curated": lambda: build_cityday_curated(manifest, zm),
         })
 
     for name in variants:
@@ -743,10 +888,14 @@ def main() -> None:
 
     # -- Bootstrap ID generation ----------------------------------------------
 
+    suffix = _boot_suffix(args.bootstrap_n)
+
     if args.generate_bootstraps:
         for preset_name, preset_kwargs in _BOOTSTRAP_PRESETS.items():
-            ids = build_bootstrap_set(manifest, **preset_kwargs)
-            out_path = data_dir / f"bootstrap_{preset_name}.json"
+            ids = build_bootstrap_set(
+                manifest, n=args.bootstrap_n, **preset_kwargs,
+            )
+            out_path = data_dir / f"bootstrap_{preset_name}{suffix}.json"
             with out_path.open("w") as f:
                 json.dump(ids, f, indent=2)
             print(f"  -> {out_path} ({len(ids)} IDs)")
@@ -756,8 +905,8 @@ def main() -> None:
     if args.generate_shared_manifests:
         assert zod_meta is not None
         zm = zod_meta
-        for boot_preset, ordering, out_name in _BOOTSTRAP_ORDERING_COMBOS:
-            boot_path = data_dir / f"bootstrap_{boot_preset}.json"
+        for boot_preset, ordering, out_stem in _BOOTSTRAP_ORDERING_COMBOS:
+            boot_path = data_dir / f"bootstrap_{boot_preset}{suffix}.json"
             if not boot_path.exists():
                 print(f"  [SKIP] {boot_path} not found -- "
                       f"run with --generate-bootstraps first")
@@ -775,6 +924,7 @@ def main() -> None:
                 strategy_name=strategy_name,
                 bootstrap_ids=boot_ids,
             )
+            out_name = f"{out_stem}{suffix}.json"
             save_manifest(data_dir / out_name, m)
             print(f"  -> {data_dir / out_name}")
 

@@ -7,11 +7,20 @@ buffer) or rejected (discarded).
 Available policies:
 - NoFilterPolicy: Accept every item (unfiltered baseline)
 - RandomPolicy: Accept each item with fixed probability (random baseline)
-- DistributionBasedPolicy: Accept items whose backbone embedding falls on the
-  tail of the distribution seen so far (novel / unusual frames)
-- UncertaintyBasedPolicy: Accept items where the model's detection confidence
-  is low (the model is uncertain = frame is informative)
-- GradientNormPolicy: Accept items with the largest parameter gradient norms
+- DistributionBasedPolicy: Accept items whose backbone Mahalanobis distance to
+  the bootstrap-calibrated reference exceeds the threshold.  Optionally
+  adaptive: the reference can be refreshed periodically from bootstrap plus
+  either the last M accepted frames (sliding window) or a uniform random
+  reservoir of size R over all past accepts.
+- DetectionUncertaintyPolicy: Accept items whose detection-head uncertainty
+  exceeds a bootstrap-calibrated threshold.  Two reductions supported
+  (topk_mean or margin on post-NMS box confidences).  Optionally adaptive
+  via the same refresh mechanism as DistributionBasedPolicy.
+- MixturePolicy: Wraps a signal-based inner policy and mixes it with a
+  random-acceptance fallback via epsilon-greedy routing (mixture_gamma
+  fraction of frames follow the inner policy, the rest follow random).
+  Addresses the sampling-bias failure mode of pure uncertainty/novelty
+  selection while preserving a domain-aware signal.
 
 Each policy returns ("accept" | "reject", metadata_dict) where the metadata
 dict carries information for logging (e.g. the score used for the decision).
@@ -101,7 +110,6 @@ class FilterPolicy(ABC):
     def __init__(self):
         self.selection_tracker = SelectionTracker()
         self.accept_fraction: float = 1.0
-        self._recent_decisions: deque[int] = deque(maxlen=200)
 
     @abstractmethod
     def select_action(
@@ -112,11 +120,6 @@ class FilterPolicy(ABC):
     ) -> FilterResult:
         """
         Decide whether to accept or reject the given stream item.
-
-        Args:
-            stream_item: The current stream item.
-            model: The current model (may be used for embedding / uncertainty).
-            device: Device to run computations on.
 
         Returns:
             (action, metadata): action is "accept" or "reject".
@@ -138,43 +141,6 @@ class FilterPolicy(ABC):
     def requires_model_forward(self) -> bool:
         """Whether this policy needs model inference/gradients per item."""
         return True
-
-    @staticmethod
-    def _compute_adaptive_threshold(
-        score_history: deque,
-        accept_fraction: float,
-    ) -> float:
-        """Return the adaptive threshold from a sliding window of scores.
-
-        The threshold is the (1 - accept_fraction) quantile of the
-        recent scores.  Items scoring above this threshold are accepted,
-        which mechanically targets an acceptance rate of
-        accept_fraction.
-
-        Args:
-            score_history: Recent scores (sliding window).
-            accept_fraction: Target fraction of items to accept.
-        """
-        if len(score_history) == 0:
-            return 0.0
-        sorted_scores = sorted(score_history)
-        idx = int(len(sorted_scores) * (1.0 - accept_fraction))
-        idx = min(idx, len(sorted_scores) - 1)
-        return sorted_scores[idx]
-
-    def _effective_accept_fraction(self) -> float:
-        """Return the accept fraction adjusted by a proportional correction.
-
-        Uses the recent post-warmup decision history to detect systematic
-        deviation from the configured accept_fraction and compensate.
-        The correction is stateless (pure function of the current window)
-        so it cannot wind up.
-        """
-        if len(self._recent_decisions) < 50:
-            return self.accept_fraction
-        observed = sum(self._recent_decisions) / len(self._recent_decisions)
-        error = self.accept_fraction - observed  # positive ⇒ under-accepting
-        return max(0.05, min(0.95, self.accept_fraction + 0.5 * error))
 
 
 # =============================================================================
@@ -265,229 +231,141 @@ class RandomPolicy(FilterPolicy):
 
 class DistributionBasedPolicy(FilterPolicy):
     """
-    Embedding-distribution-based selective training policy.
+    Mahalanobis-distance filter with a bootstrap-calibrated threshold.
 
-    Maintains a running estimate of the embedding distribution seen so far
-    (initialized from bootstrap statistics). For each new frame, extracts
-    its backbone embedding and computes a distance score.  Frames on the
-    "tail" of the distribution (high distance) are accepted as novel;
-    frames near the center are rejected as redundant.
+    For each new frame the frozen scoring model produces a backbone embedding,
+    the Mahalanobis distance to the reference (bootstrap) distribution is
+    computed, and the frame is accepted when its distance is at or above the
+    threshold.  The threshold is calibrated once from the per-frame distances
+    of the bootstrap frames at threshold_percentile (e.g. 0.10 accepts
+    the top 10% most-distant bootstrap frames -- and, by extension, any
+    stream frame more distant than that cutoff).
 
-    Supports three distance modes:
-    - "mahalanobis": Mahalanobis distance to the running mean (requires
-      covariance from bootstrap).
-    - "cosine": 1 - cosine_similarity to the running mean.
-    - "knn": Average distance to the k nearest neighbors in a stored
-      buffer of recent embeddings.
+    Accept rate therefore varies freely with stream novelty: in a familiar
+    domain scores are low and acceptance falls; in a novel domain scores are
+    high and acceptance rises.  That is the signal we care about.
 
-    To isolate domain novelty from backbone training drift, all modes
-    can use a frozen scoring model (a snapshot of the bootstrap model)
-    for embedding computation.  When scoring_model is provided, the
-    model passed to select_action is ignored for scoring -- only the
-    frozen copy is used.  This keeps scores in a stable embedding space
-    and makes distance from the bootstrap reference a genuine measure of
-    domain novelty.
+    Adaptive refresh:
+        An external ScoringRefresher can periodically re-embed
+        (bootstrap + accepted-frame reference) through a fresh snapshot of
+        the live training model and call apply_refresh to replace the
+        scoring model, the mean, the covariance, and the threshold.  The
+        accepted-frame reference is populated in one of two mutually
+        exclusive modes:
 
-    Supports three budget modes:
-    - "adaptive": (default) Sliding-window quantile thresholding that
-      targets a fixed accept_fraction per window, with feedback
-      correction.  Accept rate stays near accept_fraction regardless
-      of domain.
-    - "fixed_threshold": Threshold calibrated once from warmup scores
-      and optionally tracked with a slow EMA.  When the stream enters
-      a novel domain, scores are genuinely higher → more accepts; in a
-      familiar domain, scores are lower → fewer accepts.
-      Accept rate varies freely with stream novelty.
-    - "global_budget": Same scoring and threshold as "fixed_threshold",
-      plus a hard cap: total accepts ≤
-      accept_fraction * total_stream_items.
+        refresh_window_size = M > 0: deque of the last M accepted frame
+        ids (FIFO sliding window).
+
+        reservoir_size = R > 0: uniform random sample of all past accepts
+        maintained with Vitter's Algorithm R.  Each of the first R accepts
+        enters the reservoir unconditionally; for accept number N > R, a
+        random index j is drawn from {0, ..., N-1} and, if j < R, the new
+        frame replaces slot j.  Invariant: the reservoir is an unbiased
+        uniform sample of size min(R, count_accept) over the entire
+        accept history.
+
+        With both sizes set to 0 the filter is static: no accepted frames
+        participate in the reference, and a refresh only updates the
+        scoring model (no change to mean/cov/threshold).
 
     Args:
         bootstrap_mean: Mean embedding vector from bootstrap (1D tensor).
         bootstrap_cov: Covariance matrix from bootstrap (2D tensor).
-            Required for mode="mahalanobis".
-        bootstrap_count: Number of samples used to compute bootstrap_mean/cov.
-            Used as prior weight when update_stats=True. If unknown (<=0),
-            running-stat updates are disabled to avoid biased mean updates.
-        mode: Distance computation mode.
-        accept_fraction: Fraction of items to accept.  Used as the per-window
-            target for "adaptive", and for computing the total budget in
-            "global_budget" mode.  Ignored for "fixed_threshold".
-        budget_mode: One of "adaptive", "fixed_threshold", "global_budget".
-        score_window_size: Size of the sliding window for adaptive thresholding
-            (used by "adaptive" mode).
-        warmup_items: Accept all items unconditionally during warmup to
-            build a score distribution.
-        embedding_buffer_size: For mode="knn", how many recent embeddings
-            to store.
-        knn_k: For mode="knn", number of nearest neighbors.
-        update_stats: Whether to update running mean with accepted embeddings.
-            Covariance is kept fixed to bootstrap_cov for mahalanobis mode.
-            Forced to False when a scoring_model is provided, since
-            the reference must stay in the scoring model's embedding space.
-        threshold_percentile: For "fixed_threshold" / "global_budget" modes,
-            the percentile of warmup scores used to initialise the threshold.
-            e.g. 0.5 = warmup median.
-        threshold_ema_alpha: EMA smoothing factor for threshold tracking in
-            "fixed_threshold" / "global_budget" modes.  0.0 = truly fixed
-            threshold (strongest domain signal).  Increase (e.g. 0.0001)
-            only if model-training-induced score-scale drift causes
-            acceptance to collapse over long streams.
-        total_stream_items: For "global_budget" mode, the expected total
-            number of stream items (used to compute the accept budget).
-        scoring_model: Optional frozen model for computing embeddings.
-            When provided, select_action uses this model (not the live
-            training model) so that scores remain in a stable embedding
-            space.  The caller is responsible for freezing the model
-            (eval mode, no grad).
-        bootstrap_scores: Per-frame Mahalanobis distances from the
-            bootstrap phase.  When provided for "fixed_threshold" /
-            "global_budget" modes, the threshold is calibrated directly
-            from these scores (no warmup period needed).  This makes the
-            threshold independent of stream ordering.
+        accept_fraction: Nominal accept rate (only used for logging).
+        threshold_percentile: Fraction of the reference distribution that
+            should fall at or above the threshold.  E.g. 0.10 calibrates
+            the threshold at the 90th percentile of reference distances.
+        scoring_model: Frozen model (eval mode, no grad) used for embedding
+            computation.  The model passed to select_action is ignored.
+        bootstrap_scores: Per-frame Mahalanobis distances of the bootstrap
+            frames (used to calibrate the threshold).
+        refresh_window_size: If > 0, maintain a deque of the last M
+            accepted frame ids.  Mutually exclusive with reservoir_size.
+        reservoir_size: If > 0, maintain a uniform random reservoir of R
+            accepted frame ids (Algorithm R).  Mutually exclusive with
+            refresh_window_size.
+        reservoir_seed: Seed for the reservoir's internal random.Random.
+            Required when reservoir_size > 0 for reproducibility.
     """
 
     def __init__(
         self,
         bootstrap_mean: torch.Tensor,
-        bootstrap_cov: Optional[torch.Tensor] = None,
-        bootstrap_count: int = 0,
-        mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis",
-        accept_fraction: float = 0.3,
-        budget_mode: Literal["adaptive", "fixed_threshold", "global_budget"] = "adaptive",
-        score_window_size: int = 500,
-        warmup_items: int = 100,
-        embedding_buffer_size: int = 1000,
-        knn_k: int = 10,
-        update_stats: bool = True,
-        threshold_percentile: float = 0.5,
-        threshold_ema_alpha: float = 0.0,
-        total_stream_items: int = 0,
-        scoring_model: Optional[nn.Module] = None,
-        bootstrap_scores: Optional[List[float]] = None,
+        bootstrap_cov: torch.Tensor,
+        *,
+        scoring_model: nn.Module,
+        bootstrap_scores: List[float],
+        threshold_percentile: float = 0.10,
+        accept_fraction: float = 0.10,
+        refresh_window_size: int = 0,
+        reservoir_size: int = 0,
+        reservoir_seed: Optional[int] = None,
     ):
         super().__init__()
-        if mode == "mahalanobis" and bootstrap_cov is None:
-            raise ValueError("mahalanobis mode requires bootstrap_cov")
-        self.mode = mode
+        if bootstrap_cov is None:
+            raise ValueError("DistributionBasedPolicy requires bootstrap_cov")
+        if scoring_model is None:
+            raise ValueError("DistributionBasedPolicy requires a frozen scoring_model")
+        if not bootstrap_scores:
+            raise ValueError(
+                "DistributionBasedPolicy requires bootstrap_scores to calibrate "
+                "the threshold; regenerate bootstrap embeddings with scores."
+            )
+
+        refresh_window_size = max(0, int(refresh_window_size))
+        reservoir_size = max(0, int(reservoir_size))
+        if refresh_window_size > 0 and reservoir_size > 0:
+            raise ValueError(
+                "DistributionBasedPolicy: refresh_window_size and "
+                "reservoir_size are mutually exclusive; set at most one > 0."
+            )
+
         self.accept_fraction = accept_fraction
-        self.budget_mode = budget_mode
-        self.score_window_size = score_window_size
-        self.warmup_items = warmup_items
-        self.knn_k = knn_k
         self.threshold_percentile = threshold_percentile
-        self.threshold_ema_alpha = threshold_ema_alpha
-        self.total_stream_items = total_stream_items
 
-        # Running statistics
         self.mean = bootstrap_mean.clone().float()
-        self.cov = bootstrap_cov.clone().float() if bootstrap_cov is not None else None
-        self._cov_inv: Optional[torch.Tensor] = None
+        self.cov = bootstrap_cov.clone().float()
+        reg = 1e-5 * torch.eye(self.cov.shape[0])
+        self._cov_inv: torch.Tensor = torch.linalg.inv(self.cov + reg)
 
-        if self.cov is not None:
-            reg = 1e-5 * torch.eye(self.cov.shape[0])
-            self._cov_inv = torch.linalg.inv(self.cov + reg)
+        self._scoring_model = scoring_model
+        self._threshold: float = self._percentile(bootstrap_scores, threshold_percentile)
 
-        # Embedding buffer for kNN
-        self.embedding_buffer: deque = deque(maxlen=embedding_buffer_size)
-
-        # Sliding window for adaptive thresholding (used by "adaptive" mode)
-        self.score_history: deque = deque(maxlen=score_window_size)
-
-        # Counters
         self.items_seen = 0
         self.count_accept = 0
         self.count_reject = 0
 
-        # Frozen scoring model -- if provided, all embeddings for scoring
-        # are computed through this model instead of the live training model.
-        self._scoring_model = scoring_model
+        self.refresh_window_size: int = refresh_window_size
+        self.reservoir_size: int = reservoir_size
+        self._accepted_deque: deque[str] = deque(
+            maxlen=self.refresh_window_size if self.refresh_window_size > 0 else 1,
+        )
+        self._reservoir: List[str] = []
+        self._reservoir_rng: random.Random = random.Random(reservoir_seed)
+        self.num_refreshes: int = 0
 
-        # Running-mean update state (prior from bootstrap stats).
-        # Forced OFF when a scoring_model is provided (the reference must
-        # stay in the scoring model's embedding space).
-        self.bootstrap_count = int(max(bootstrap_count, 0))
-        if scoring_model is not None:
-            self.update_stats = False
+    @staticmethod
+    def _percentile(scores: List[float] | torch.Tensor, percentile: float) -> float:
+        """Return the (1 - percentile) quantile of scores (top-p cutoff)."""
+        if isinstance(scores, torch.Tensor):
+            sorted_scores, _ = torch.sort(scores.float())
+            arr = sorted_scores.tolist()
         else:
-            self.update_stats = bool(update_stats and self.bootstrap_count > 0)
-        self._n_embeddings = self.bootstrap_count
-
-        # EMA threshold for fixed_threshold / global_budget modes.
-        self._ema_threshold: float = 0.0
-        self._bootstrap_calibrated: bool = False
-
-        if (
-            bootstrap_scores is not None
-            and len(bootstrap_scores) > 0
-            and budget_mode in ("fixed_threshold", "global_budget")
-        ):
-            sorted_scores = sorted(bootstrap_scores)
-            idx = int(len(sorted_scores) * (1.0 - threshold_percentile))
-            idx = min(idx, len(sorted_scores) - 1)
-            self._ema_threshold = sorted_scores[idx]
-            self._bootstrap_calibrated = True
-
-        # Global budget (for "global_budget" mode)
-        self._budget_remaining: int = max(
-            1, int(accept_fraction * total_stream_items)
-        ) if budget_mode == "global_budget" and total_stream_items > 0 else 0
+            arr = sorted(scores)
+        if not arr:
+            return 0.0
+        idx = int(len(arr) * (1.0 - percentile))
+        idx = min(max(idx, 0), len(arr) - 1)
+        return float(arr[idx])
 
     def _compute_score(self, embedding: torch.Tensor) -> float:
-        """Compute a distance score for a single embedding (1D tensor)."""
+        """Mahalanobis distance from embedding to the reference mean."""
         emb = embedding.float()
-
-        if self.mode == "mahalanobis":
-            if self._cov_inv is None:
-                diff = emb - self.mean
-                return float(diff.norm().item())
-            diff = emb - self.mean
-            return float(torch.sqrt(diff @ self._cov_inv @ diff).item())
-
-        elif self.mode == "cosine":
-            sim = torch.nn.functional.cosine_similarity(
-                emb.unsqueeze(0), self.mean.unsqueeze(0)
-            )
-            return float(1.0 - sim.item())
-
-        elif self.mode == "knn":
-            if len(self.embedding_buffer) < self.knn_k:
-                return float("inf")
-            buf = torch.stack(list(self.embedding_buffer))
-            dists = torch.cdist(emb.unsqueeze(0), buf).squeeze(0)
-            topk_dists, _ = dists.topk(self.knn_k, largest=False)
-            return float(topk_dists.mean().item())
-
-        raise ValueError(f"Unknown mode: {self.mode}")
+        diff = emb - self.mean
+        return float(torch.sqrt(diff @ self._cov_inv @ diff).item())
 
     def _get_threshold(self) -> float:
-        if self.budget_mode in ("fixed_threshold", "global_budget"):
-            return self._ema_threshold
-        return self._compute_adaptive_threshold(
-            self.score_history, self._effective_accept_fraction(),
-        )
-
-    def _calibrate_ema_threshold(self) -> None:
-        """Initialise the EMA threshold from warmup scores."""
-        if not self.score_history:
-            self._ema_threshold = 0.0
-            return
-        sorted_scores = sorted(self.score_history)
-        idx = int(len(sorted_scores) * (1.0 - self.threshold_percentile))
-        idx = min(idx, len(sorted_scores) - 1)
-        self._ema_threshold = sorted_scores[idx]
-
-    def _update_ema_threshold(self, score: float) -> None:
-        """Slowly track score-scale drift without chasing domain content."""
-        self._ema_threshold += self.threshold_ema_alpha * (score - self._ema_threshold)
-
-    def _update_running_stats(self, embedding: torch.Tensor) -> None:
-        """Incrementally update running mean with a new embedding."""
-        self._n_embeddings += 1
-        emb = embedding.float()
-        self.mean = self.mean + (emb - self.mean) / self._n_embeddings
-        if self.mode == "knn":
-            self.embedding_buffer.append(emb.cpu())
+        return self._threshold
 
     def select_action(
         self,
@@ -498,54 +376,557 @@ class DistributionBasedPolicy(FilterPolicy):
         self.items_seen += 1
 
         image = stream_item.image.to(device)
-        scorer = self._scoring_model if self._scoring_model is not None else model
-        embedding = scorer.get_embedding([image]).squeeze(0).cpu()
+        embedding = self._scoring_model.get_embedding([image]).squeeze(0).cpu()
 
         score = self._compute_score(embedding)
-        self.score_history.append(score)
+        threshold = self._threshold
 
-        if self.update_stats:
-            self._update_running_stats(embedding)
-
-        meta: Dict[str, Any] = {"score": score, "mode": self.mode, "budget_mode": self.budget_mode}
-
-        # Warmup: accept all to build score distribution.
-        # Skipped when threshold was pre-calibrated from bootstrap scores.
-        if not self._bootstrap_calibrated and self.items_seen <= self.warmup_items:
-            self.count_accept += 1
-            if self.budget_mode == "global_budget":
-                self._budget_remaining -= 1
-            self.selection_tracker.record("accept", stream_item.categories)
-            if self.items_seen == self.warmup_items and self.budget_mode in ("fixed_threshold", "global_budget"):
-                self._calibrate_ema_threshold()
-            return ("accept", meta)
-
-        # Slowly track score-scale drift for EMA-threshold modes
-        if self.budget_mode in ("fixed_threshold", "global_budget"):
-            self._update_ema_threshold(score)
-
-        threshold = self._get_threshold()
-        meta["threshold"] = threshold
-
-        # Global budget: reject everything once budget exhausted
-        if self.budget_mode == "global_budget" and self._budget_remaining <= 0:
-            self.count_reject += 1
-            self._recent_decisions.append(0)
-            self.selection_tracker.record("reject", stream_item.categories)
-            return ("reject", meta)
+        meta: Dict[str, Any] = {"score": score, "threshold": threshold}
 
         if score >= threshold:
             self.count_accept += 1
-            self._recent_decisions.append(1)
             self.selection_tracker.record("accept", stream_item.categories)
-            if self.budget_mode == "global_budget":
-                self._budget_remaining -= 1
+            self._record_accepted(stream_item)
             return ("accept", meta)
+
+        self.count_reject += 1
+        self.selection_tracker.record("reject", stream_item.categories)
+        return ("reject", meta)
+
+    def _record_accepted(self, stream_item: StreamItem) -> None:
+        """Record an accepted frame-id in the active reference set (if any).
+
+        Dispatches on the configured mode:
+            refresh_window_size > 0: append to the FIFO deque; deque
+            auto-evicts the oldest id once maxlen is reached.
+
+            reservoir_size > 0: Vitter's Algorithm R.  count_accept has
+            already been incremented in select_action before this is
+            called, so it equals N (the 1-indexed accept number).  For
+            N <= R: append.  For N > R: draw j ~ Uniform{0..N-1}; if
+            j < R, replace _reservoir[j] with the new frame_id.
+
+            Neither set: no-op.
+
+        Frames without a frame_id in metadata are silently skipped so the
+        refresher can't accidentally request entries for them.
+        """
+        frame_id = stream_item.metadata.get("frame_id")
+        if frame_id is None:
+            return
+        fid = str(frame_id)
+
+        if self.refresh_window_size > 0:
+            self._accepted_deque.append(fid)
+            return
+
+        if self.reservoir_size > 0:
+            n = self.count_accept  # 1-indexed: this is the Nth accept.
+            r = self.reservoir_size
+            if n <= r:
+                self._reservoir.append(fid)
+            else:
+                j = self._reservoir_rng.randrange(n)  # [0, n-1]
+                if j < r:
+                    self._reservoir[j] = fid
+
+    def get_accepted_frame_ids(self) -> List[str]:
+        """Return a snapshot of the current accepted-frame reference.
+
+        Window mode returns oldest -> newest order.  Reservoir mode returns
+        insertion order of current reservoir slots (callers that need an
+        unordered sample should shuffle).  Static mode (both sizes = 0)
+        returns an empty list.
+        """
+        if self.refresh_window_size > 0:
+            return list(self._accepted_deque)
+        if self.reservoir_size > 0:
+            return list(self._reservoir)
+        return []
+
+    def apply_refresh(
+        self,
+        *,
+        scoring_model: nn.Module,
+        mean: torch.Tensor,
+        cov: torch.Tensor,
+        scores: torch.Tensor,
+    ) -> Dict[str, Any]:
+        """Replace scoring model, reference, and threshold atomically.
+
+        Called by a ScoringRefresher after re-embedding bootstrap + accepted
+        window through a fresh snapshot of the live training model.  The new
+        threshold is recomputed at threshold_percentile so the static and
+        adaptive filters share one calibration rule.
+        """
+        threshold_before = self._threshold
+
+        self._scoring_model = scoring_model
+        self.mean = mean.clone().float()
+        self.cov = cov.clone().float()
+        reg = 1e-5 * torch.eye(self.cov.shape[0])
+        self._cov_inv = torch.linalg.inv(self.cov + reg)
+        self._threshold = self._percentile(scores, self.threshold_percentile)
+
+        self.num_refreshes += 1
+
+        return {
+            "num_refreshes": self.num_refreshes,
+            "items_seen_at_refresh": self.items_seen,
+            "window_size": len(self.get_accepted_frame_ids()),
+            "threshold_before": float(threshold_before),
+            "threshold_after": float(self._threshold),
+            "reference_size": int(scores.numel()),
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self.count_accept + self.count_reject
+        return {
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
+            "items_seen": self.items_seen,
+            "accept_fraction": self.accept_fraction,
+            "threshold_percentile": self.threshold_percentile,
+            "current_threshold": self._threshold,
+            "refresh_window_size": self.refresh_window_size,
+            "reservoir_size": self.reservoir_size,
+            "current_window_size": len(self.get_accepted_frame_ids()),
+            "num_refreshes": self.num_refreshes,
+        }
+
+
+# =============================================================================
+# DetectionUncertaintyPolicy
+# =============================================================================
+
+
+class DetectionUncertaintyPolicy(FilterPolicy):
+    """
+    Prediction-uncertainty filter with a bootstrap-calibrated threshold.
+
+    For each new frame the frozen scoring model runs detection inference and
+    a per-frame uncertainty score is derived from the top-K post-NMS
+    classification confidences.  Frames with uncertainty at or above the
+    threshold are accepted.  The threshold is calibrated from per-frame
+    uncertainty scores over the reference set at threshold_percentile.
+
+    Score definition:
+        Two reductions are supported, selected by score_mode:
+
+        topk_mean: score = 1 - mean(top_k box scores).  Low mean
+        confidence on the most confident detections -> high uncertainty.
+
+        margin: score = 1 - (top1 - top2 box scores).  Two near-equal
+        top detections -> high uncertainty (ambiguous decision).  Falls
+        back to 1 - top1 when the frame has a single detection.
+
+        Both modes clamp to [0, 1].  Frames with zero detections score
+        1.0 (maximum uncertainty -- the detector is effectively "blind"
+        on that frame and is almost certainly informative to label).
+
+    Why this signal:
+        A Mahalanobis filter on backbone embeddings measures appearance
+        novelty: how visually different a frame is from the bootstrap
+        distribution.  Appearance novelty and task informativeness are
+        correlated but not identical -- the detector may already handle a
+        visually novel frame well (for example, a night scene with only
+        the usual cars), and may still struggle with an appearance-familiar
+        frame (for example, a daylight urban scene with many small
+        pedestrians).  The uncertainty signal scores the latter directly.
+
+    Adaptive refresh:
+        An external ScoringRefresher can periodically re-score
+        (bootstrap + accepted-frame reference) through a fresh snapshot of
+        the live training model and call apply_refresh to replace the
+        scoring model and the threshold.  The accepted-frame reference is
+        populated in one of two mutually exclusive modes, matching
+        DistributionBasedPolicy:
+
+        refresh_window_size = M > 0: deque of the last M accepted frame
+        ids (FIFO sliding window).
+
+        reservoir_size = R > 0: uniform random sample of all past accepts
+        maintained with Vitter's Algorithm R.
+
+        With both sizes set to 0 the filter is static: no accepted frames
+        participate in the reference, and a refresh only updates the
+        scoring model and recomputes the threshold from refreshed
+        bootstrap scores.
+
+    Args:
+        scoring_model: Frozen detector snapshot in eval mode with gradients
+            disabled.  Called as scoring_model([image]) to obtain the
+            list-of-prediction-dicts torchvision detection output; the
+            "scores" field supplies the per-box confidences.
+        bootstrap_scores: Per-frame uncertainty scores over the bootstrap
+            frames, used to calibrate the initial threshold.
+        threshold_percentile: Fraction of the reference distribution that
+            should fall at or above the threshold.  E.g. 0.15 calibrates
+            the threshold at the 85th percentile of bootstrap uncertainties;
+            a stream frame is accepted iff its uncertainty is at least that
+            large.
+        accept_fraction: Nominal accept rate (logging only; the actual
+            accept rate varies with stream content).
+        top_k: Number of top-confidence detections to average when
+            computing per-frame uncertainty in topk_mean mode.  Ignored
+            by margin mode.  Defaults to 10.
+        score_mode: Reduction used to turn per-box confidences into a
+            per-frame score.  Either "topk_mean" (default) or "margin".
+        refresh_window_size: If > 0, maintain a deque of the last M
+            accepted frame ids.  Mutually exclusive with reservoir_size.
+        reservoir_size: If > 0, maintain a uniform random reservoir of R
+            accepted frame ids (Algorithm R).  Mutually exclusive with
+            refresh_window_size.
+        reservoir_seed: Seed for the reservoir's internal random.Random.
+            Required when reservoir_size > 0 for reproducibility.
+    """
+
+    def __init__(
+        self,
+        *,
+        scoring_model: nn.Module,
+        bootstrap_scores: List[float],
+        threshold_percentile: float = 0.15,
+        accept_fraction: float = 0.15,
+        top_k: int = 10,
+        score_mode: Literal["topk_mean", "margin"] = "topk_mean",
+        refresh_window_size: int = 0,
+        reservoir_size: int = 0,
+        reservoir_seed: Optional[int] = None,
+    ):
+        super().__init__()
+        if scoring_model is None:
+            raise ValueError(
+                "DetectionUncertaintyPolicy requires a frozen scoring_model"
+            )
+        if not bootstrap_scores:
+            raise ValueError(
+                "DetectionUncertaintyPolicy requires bootstrap_scores to "
+                "calibrate the threshold; run collect_uncertainties over "
+                "the bootstrap frames."
+            )
+        if top_k <= 0:
+            raise ValueError(f"top_k must be >= 1, got {top_k}")
+        if score_mode not in ("topk_mean", "margin"):
+            raise ValueError(
+                f"score_mode must be 'topk_mean' or 'margin', got {score_mode!r}"
+            )
+
+        refresh_window_size = max(0, int(refresh_window_size))
+        reservoir_size = max(0, int(reservoir_size))
+        if refresh_window_size > 0 and reservoir_size > 0:
+            raise ValueError(
+                "DetectionUncertaintyPolicy: refresh_window_size and "
+                "reservoir_size are mutually exclusive; set at most one > 0."
+            )
+
+        self.accept_fraction = accept_fraction
+        self.threshold_percentile = threshold_percentile
+        self.top_k = int(top_k)
+        self.score_mode: str = score_mode
+
+        self._scoring_model = scoring_model
+        self._threshold: float = self._percentile(
+            bootstrap_scores, threshold_percentile,
+        )
+
+        self.items_seen = 0
+        self.count_accept = 0
+        self.count_reject = 0
+
+        self.refresh_window_size: int = refresh_window_size
+        self.reservoir_size: int = reservoir_size
+        self._accepted_deque: deque[str] = deque(
+            maxlen=self.refresh_window_size if self.refresh_window_size > 0 else 1,
+        )
+        self._reservoir: List[str] = []
+        self._reservoir_rng: random.Random = random.Random(reservoir_seed)
+        self.num_refreshes: int = 0
+
+    @staticmethod
+    def _percentile(
+        scores: "List[float] | torch.Tensor", percentile: float,
+    ) -> float:
+        """Return the (1 - percentile) quantile of scores (top-p cutoff)."""
+        if isinstance(scores, torch.Tensor):
+            sorted_scores, _ = torch.sort(scores.float())
+            arr = sorted_scores.tolist()
         else:
-            self.count_reject += 1
-            self._recent_decisions.append(0)
-            self.selection_tracker.record("reject", stream_item.categories)
-            return ("reject", meta)
+            arr = sorted(scores)
+        if not arr:
+            return 0.0
+        idx = int(len(arr) * (1.0 - percentile))
+        idx = min(max(idx, 0), len(arr) - 1)
+        return float(arr[idx])
+
+    def _compute_score(self, image: torch.Tensor) -> float:
+        """Per-frame uncertainty score using the configured score_mode."""
+        from ..training.streaming import _frame_uncertainty_score
+        with torch.no_grad():
+            preds = self._scoring_model([image])
+        if not preds:
+            return 1.0
+        scores = preds[0].get("scores")
+        return _frame_uncertainty_score(scores, self.top_k, self.score_mode)
+
+    def _get_threshold(self) -> float:
+        return self._threshold
+
+    def select_action(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        device: torch.device,
+    ) -> FilterResult:
+        self.items_seen += 1
+
+        image = stream_item.image.to(device)
+        score = self._compute_score(image)
+        threshold = self._threshold
+
+        meta: Dict[str, Any] = {
+            "metric": "uncertainty_score",
+            "score": score,
+            "threshold": threshold,
+        }
+
+        if score >= threshold:
+            self.count_accept += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            self._record_accepted(stream_item)
+            return ("accept", meta)
+
+        self.count_reject += 1
+        self.selection_tracker.record("reject", stream_item.categories)
+        return ("reject", meta)
+
+    def _record_accepted(self, stream_item: StreamItem) -> None:
+        """Record an accepted frame-id in the active reference set (if any).
+
+        Same dispatch as DistributionBasedPolicy._record_accepted: window
+        mode appends to the FIFO deque; reservoir mode runs Vitter's
+        Algorithm R over the accept count.  Frames without a frame_id in
+        metadata are silently skipped.
+        """
+        frame_id = stream_item.metadata.get("frame_id")
+        if frame_id is None:
+            return
+        fid = str(frame_id)
+
+        if self.refresh_window_size > 0:
+            self._accepted_deque.append(fid)
+            return
+
+        if self.reservoir_size > 0:
+            n = self.count_accept  # 1-indexed Nth accept (post-increment in select_action).
+            r = self.reservoir_size
+            if n <= r:
+                self._reservoir.append(fid)
+            else:
+                j = self._reservoir_rng.randrange(n)  # [0, n-1]
+                if j < r:
+                    self._reservoir[j] = fid
+
+    def get_accepted_frame_ids(self) -> List[str]:
+        """Return a snapshot of the current accepted-frame reference.
+
+        Window mode returns oldest -> newest order.  Reservoir mode returns
+        insertion order of current reservoir slots (callers that need an
+        unordered sample should shuffle).  Static mode (both sizes = 0)
+        returns an empty list.
+        """
+        if self.refresh_window_size > 0:
+            return list(self._accepted_deque)
+        if self.reservoir_size > 0:
+            return list(self._reservoir)
+        return []
+
+    def apply_refresh(
+        self,
+        *,
+        scoring_model: nn.Module,
+        scores: torch.Tensor,
+    ) -> Dict[str, Any]:
+        """Replace scoring model and threshold atomically.
+
+        Called by a ScoringRefresher after re-scoring (bootstrap + accepted
+        reference) through a fresh snapshot of the live training model.
+        The new threshold is recomputed at threshold_percentile so the
+        static and adaptive uncertainty filters share one calibration rule
+        (and match the rule used by DistributionBasedPolicy).
+        """
+        threshold_before = self._threshold
+
+        self._scoring_model = scoring_model
+        self._threshold = self._percentile(scores, self.threshold_percentile)
+
+        self.num_refreshes += 1
+
+        return {
+            "num_refreshes": self.num_refreshes,
+            "items_seen_at_refresh": self.items_seen,
+            "window_size": len(self.get_accepted_frame_ids()),
+            "threshold_before": float(threshold_before),
+            "threshold_after": float(self._threshold),
+            "reference_size": int(scores.numel()),
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        total = self.count_accept + self.count_reject
+        return {
+            "count_accept": self.count_accept,
+            "count_reject": self.count_reject,
+            "accept_rate": self.count_accept / max(total, 1),
+            "items_seen": self.items_seen,
+            "accept_fraction": self.accept_fraction,
+            "threshold_percentile": self.threshold_percentile,
+            "current_threshold": self._threshold,
+            "top_k": self.top_k,
+            "score_mode": self.score_mode,
+            "refresh_window_size": self.refresh_window_size,
+            "reservoir_size": self.reservoir_size,
+            "current_window_size": len(self.get_accepted_frame_ids()),
+            "num_refreshes": self.num_refreshes,
+        }
+
+
+# =============================================================================
+# MixturePolicy
+# =============================================================================
+
+
+class MixturePolicy(FilterPolicy):
+    """
+    Epsilon-greedy mixture of a signal-based inner policy and random.
+
+    Per frame, draws u ~ U(0, 1) from an internal RNG:
+
+        u < mixture_gamma: delegate to inner.select_action (signal path).
+        u >= mixture_gamma: accept with probability accept_fraction
+                            (random path, independent of content).
+
+    Frames accepted via either path are recorded into the inner policy's
+    accepted-frame reference (sliding window or reservoir), so a later
+    refresh sees the actual training distribution rather than the
+    signal-selected subset.  Frames scored via the random path are not
+    run through the inner scoring model, so the wall-clock cost is
+    roughly gamma x inner + (1 - gamma) x negligible.
+
+    Rationale: pure signal-based AL (Mahalanobis, top-K uncertainty,
+    margin) systematically under-samples easy in-distribution frames,
+    shifting the training distribution away from the evaluation
+    distribution.  Mixing with a random fraction restores coverage of
+    common modes while retaining the exploratory pull toward novel or
+    uncertain frames.  The overall accept rate satisfies
+
+        overall_rate approx gamma * signal_rate + (1 - gamma) * accept_fraction
+
+    and stays close to accept_fraction when the inner policy is
+    calibrated at threshold_percentile = accept_fraction.
+
+    Args:
+        inner: Signal-based policy to delegate signal-path decisions to.
+            Typically a DistributionBasedPolicy or DetectionUncertaintyPolicy.
+            The inner policy owns the accepted-frame reference (sliding
+            window or reservoir) and the refresh machinery.
+        mixture_gamma: Fraction of frames routed to the inner policy.
+            0.0 is equivalent to RandomPolicy(accept_fraction); 1.0 is
+            equivalent to the inner policy alone.
+        accept_fraction: Acceptance probability used on the random path.
+            Also reported as the policy-level accept_fraction for
+            logging symmetry with RandomPolicy.
+        rng_seed: Seed for the internal random.Random governing routing
+            and the random-path coin flip.  Independent of the inner
+            policy's reservoir RNG.
+    """
+
+    def __init__(
+        self,
+        *,
+        inner: FilterPolicy,
+        mixture_gamma: float,
+        accept_fraction: float,
+        rng_seed: Optional[int] = None,
+    ):
+        super().__init__()
+        if not 0.0 <= mixture_gamma <= 1.0:
+            raise ValueError(
+                f"mixture_gamma must be in [0, 1], got {mixture_gamma}"
+            )
+        if not 0.0 <= accept_fraction <= 1.0:
+            raise ValueError(
+                f"accept_fraction must be in [0, 1], got {accept_fraction}"
+            )
+
+        self.inner = inner
+        self.mixture_gamma = float(mixture_gamma)
+        self.accept_fraction = float(accept_fraction)
+        self._rng = random.Random(rng_seed)
+
+        self.items_seen = 0
+        self.count_accept = 0
+        self.count_reject = 0
+        self.count_accept_signal = 0
+        self.count_accept_random = 0
+        self.count_signal_path = 0
+        self.count_random_path = 0
+
+    def select_action(
+        self,
+        stream_item: StreamItem,
+        model: nn.Module,
+        device: torch.device,
+    ) -> FilterResult:
+        self.items_seen += 1
+        u = self._rng.random()
+
+        if u < self.mixture_gamma:
+            self.count_signal_path += 1
+            action, inner_meta = self.inner.select_action(
+                stream_item, model, device,
+            )
+            meta: Dict[str, Any] = dict(inner_meta)
+            meta["path"] = "signal"
+            meta["mixture_u"] = u
+            if action == "accept":
+                self.count_accept += 1
+                self.count_accept_signal += 1
+                self.selection_tracker.record("accept", stream_item.categories)
+            else:
+                self.count_reject += 1
+                self.selection_tracker.record("reject", stream_item.categories)
+            return action, meta
+
+        self.count_random_path += 1
+        r = self._rng.random()
+        meta = {"path": "random", "mixture_u": u, "random_score": r}
+        if r < self.accept_fraction:
+            self.count_accept += 1
+            self.count_accept_random += 1
+            self.selection_tracker.record("accept", stream_item.categories)
+            self._record_into_inner(stream_item)
+            return ("accept", meta)
+
+        self.count_reject += 1
+        self.selection_tracker.record("reject", stream_item.categories)
+        return ("reject", meta)
+
+    def _record_into_inner(self, stream_item: StreamItem) -> None:
+        """Route random-path accepts into the inner policy's reference.
+
+        The inner policy's _record_accepted uses inner.count_accept as
+        Vitter's 1-indexed N, so we increment it before delegating.
+        Policies without an accepted-frame reference (NoFilterPolicy,
+        RandomPolicy) have no _record_accepted hook and are silently
+        skipped.
+        """
+        record_fn = getattr(self.inner, "_record_accepted", None)
+        if record_fn is None:
+            return
+        if hasattr(self.inner, "count_accept"):
+            self.inner.count_accept += 1
+        record_fn(stream_item)
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.count_accept + self.count_reject
@@ -554,252 +935,16 @@ class DistributionBasedPolicy(FilterPolicy):
             "count_reject": self.count_reject,
             "accept_rate": self.count_accept / max(total, 1),
             "items_seen": self.items_seen,
-            "mode": self.mode,
-            "budget_mode": self.budget_mode,
             "accept_fraction": self.accept_fraction,
-            "bootstrap_count": self.bootstrap_count,
-            "update_stats_enabled": self.update_stats,
-            "frozen_scoring_model": self._scoring_model is not None,
-            "current_threshold": self._get_threshold(),
-            "bootstrap_calibrated": self._bootstrap_calibrated,
+            "mixture_gamma": self.mixture_gamma,
+            "count_signal_path": self.count_signal_path,
+            "count_random_path": self.count_random_path,
+            "count_accept_signal": self.count_accept_signal,
+            "count_accept_random": self.count_accept_random,
         }
-        if self.budget_mode == "adaptive":
-            stats["effective_accept_fraction"] = self._effective_accept_fraction()
-        if self.budget_mode in ("fixed_threshold", "global_budget"):
-            stats["threshold_percentile"] = self.threshold_percentile
-            stats["threshold_ema_alpha"] = self.threshold_ema_alpha
-        if self.budget_mode == "global_budget":
-            stats["budget_remaining"] = self._budget_remaining
+        for k, v in self.inner.get_stats().items():
+            stats[f"inner_{k}"] = v
         return stats
 
-
-# =============================================================================
-# UncertaintyBasedPolicy
-# =============================================================================
-
-
-class UncertaintyBasedPolicy(FilterPolicy):
-    """
-    Prediction-uncertainty-based selective training policy.
-
-    Runs inference on each frame and measures prediction uncertainty:
-    the fewer high-confidence detections the model produces, the more
-    uncertain it is about the frame content.
-
-    Uncertainty score = 1 - (mean of top-K detection scores).
-    Frames where the model is most uncertain are accepted.
-
-    Args:
-        accept_fraction: Fraction of items to accept (highest uncertainty).
-        score_window_size: Size of the sliding window for adaptive thresholding.
-        warmup_items: Accept all items unconditionally during warmup.
-        confidence_threshold: Minimum detection score to consider.
-        top_k_detections: How many top detections to average for the
-            confidence estimate.
-    """
-
-    def __init__(
-        self,
-        accept_fraction: float = 0.3,
-        score_window_size: int = 500,
-        warmup_items: int = 100,
-        confidence_threshold: float = 0.1,
-        top_k_detections: int = 5,
-    ):
-        super().__init__()
-        self.accept_fraction = accept_fraction
-        self.score_window_size = score_window_size
-        self.warmup_items = warmup_items
-        self.confidence_threshold = confidence_threshold
-        self.top_k_detections = top_k_detections
-
-        self.score_history: deque = deque(maxlen=score_window_size)
-        self.items_seen = 0
-        self.count_accept = 0
-        self.count_reject = 0
-
-    def _compute_uncertainty(self, predictions: Dict[str, torch.Tensor]) -> float:
-        """Compute uncertainty from detection predictions."""
-        scores = predictions["scores"]
-        scores = scores[scores >= self.confidence_threshold]
-
-        if len(scores) == 0:
-            return 1.0  # max uncertainty: no detections at all
-
-        top_scores = scores.sort(descending=True).values[: self.top_k_detections]
-        mean_conf = float(top_scores.mean().item())
-        return 1.0 - mean_conf
-
-    def _get_threshold(self) -> float:
-        return self._compute_adaptive_threshold(
-            self.score_history, self._effective_accept_fraction(),
-        )
-
-    @torch.no_grad()
-    def select_action(
-        self,
-        stream_item: StreamItem,
-        model: nn.Module,
-        device: torch.device,
-    ) -> FilterResult:
-        self.items_seen += 1
-
-        was_training = model.training
-        model.eval()
-
-        image = stream_item.image.to(device)
-        predictions = model([image])[0]
-
-        if was_training:
-            model.train()
-
-        uncertainty = self._compute_uncertainty(predictions)
-        self.score_history.append(uncertainty)
-
-        meta = {"uncertainty": uncertainty}
-
-        if self.items_seen <= self.warmup_items:
-            self.count_accept += 1
-            self.selection_tracker.record("accept", stream_item.categories)
-            return ("accept", meta)
-
-        threshold = self._get_threshold()
-        meta["threshold"] = threshold
-
-        if uncertainty >= threshold:
-            self.count_accept += 1
-            self._recent_decisions.append(1)
-            self.selection_tracker.record("accept", stream_item.categories)
-            return ("accept", meta)
-        else:
-            self.count_reject += 1
-            self._recent_decisions.append(0)
-            self.selection_tracker.record("reject", stream_item.categories)
-            return ("reject", meta)
-
-    def get_stats(self) -> Dict[str, Any]:
-        total = self.count_accept + self.count_reject
-        return {
-            "count_accept": self.count_accept,
-            "count_reject": self.count_reject,
-            "accept_rate": self.count_accept / max(total, 1),
-            "items_seen": self.items_seen,
-            "accept_fraction": self.accept_fraction,
-            "effective_accept_fraction": self._effective_accept_fraction(),
-            "current_threshold": self._get_threshold(),
-        }
-
-
-# =============================================================================
-# GradientNormPolicy
-# =============================================================================
-
-
-class GradientNormPolicy(FilterPolicy):
-    """
-    Gradient-norm selective training policy.
-
-    Computes the L2 norm of per-sample parameter gradients as an importance
-    score and selects items with the highest norms for training.  Gradient
-    norm captures how much a sample would move the model parameters.
-
-    Args:
-        accept_fraction: Fraction of items to accept (highest gradient norm).
-        norm_window_size: Sliding window for adaptive thresholding.
-        warmup_items: Accept all items during warmup.
-    """
-
-    def __init__(
-        self,
-        accept_fraction: float = 0.3,
-        norm_window_size: int = 500,
-        warmup_items: int = 200,
-    ):
-        super().__init__()
-        self.accept_fraction = accept_fraction
-        self.norm_window_size = norm_window_size
-        self.warmup_items = warmup_items
-
-        self.norm_history: deque = deque(maxlen=norm_window_size)
-        self.items_seen = 0
-        self.count_accept = 0
-        self.count_reject = 0
-
-    def _compute_gradient_norm(
-        self,
-        stream_item: StreamItem,
-        model: nn.Module,
-        device: torch.device,
-    ) -> float:
-        was_training = model.training
-        model.train()
-        image = stream_item.image.to(device)
-        target = {
-            "boxes": stream_item.annotations["boxes"].to(device),
-            "labels": stream_item.annotations["labels"].to(device),
-        }
-        loss_dict = model([image], [target])
-        loss = torch.stack(list(loss_dict.values())).sum()
-
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        grads = torch.autograd.grad(
-            loss, trainable_params, retain_graph=False, allow_unused=True,
-        )
-        total = 0.0
-        for g in grads:
-            if g is not None:
-                total += g.pow(2).sum().item()
-
-        if not was_training:
-            model.eval()
-
-        return total ** 0.5
-
-    def _get_threshold(self) -> float:
-        return self._compute_adaptive_threshold(
-            self.norm_history, self._effective_accept_fraction(),
-        )
-
-    def select_action(
-        self,
-        stream_item: StreamItem,
-        model: nn.Module,
-        device: torch.device,
-    ) -> FilterResult:
-        self.items_seen += 1
-
-        grad_norm = self._compute_gradient_norm(stream_item, model, device)
-        self.norm_history.append(grad_norm)
-
-        meta = {"grad_norm": grad_norm}
-
-        if self.items_seen <= self.warmup_items:
-            self.count_accept += 1
-            self.selection_tracker.record("accept", stream_item.categories)
-            return ("accept", meta)
-
-        threshold = self._get_threshold()
-        meta["threshold"] = threshold
-
-        if grad_norm >= threshold:
-            self.count_accept += 1
-            self._recent_decisions.append(1)
-            self.selection_tracker.record("accept", stream_item.categories)
-            return ("accept", meta)
-        else:
-            self.count_reject += 1
-            self._recent_decisions.append(0)
-            self.selection_tracker.record("reject", stream_item.categories)
-            return ("reject", meta)
-
-    def get_stats(self) -> Dict[str, Any]:
-        total = self.count_accept + self.count_reject
-        return {
-            "count_accept": self.count_accept,
-            "count_reject": self.count_reject,
-            "accept_rate": self.count_accept / max(total, 1),
-            "items_seen": self.items_seen,
-            "accept_fraction": self.accept_fraction,
-            "effective_accept_fraction": self._effective_accept_fraction(),
-            "current_threshold": self._get_threshold(),
-        }
+    def requires_model_forward(self) -> bool:
+        return self.inner.requires_model_forward()

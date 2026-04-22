@@ -1,8 +1,7 @@
 """
 Metrics tracking for buffer-based streaming detection experiments.
 
-Tracks accept/reject decisions, buffer flushes, detection performance,
-and novelty metrics.
+Tracks accept/reject decisions, buffer flushes, and detection performance.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from ..core import CATEGORY_ID_TO_NAME
+from ..evaluation.detection import DEFAULT_DOMAIN_DIMS
 
 _DEFAULT_CLASS_NAMES: List[str] = list(CATEGORY_ID_TO_NAME.values())
 _CHECKPOINT_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
@@ -27,12 +27,14 @@ class StreamingMetricsLogger:
     - Decisions: accept/reject counts and rates
     - Compute: forward passes, buffer flushes (training events)
     - Performance: periodic evaluation on held-out data (mAP)
-    - Novelty: novel-category accept rates (from NoveltyTracker)
     - Per-frame decisions: detailed log for analysis
 
     CSV files written:
     - streaming_metrics.csv: Main metrics at each checkpoint
-    - checkpoints.csv: Evaluation metrics at checkpoint intervals
+    - checkpoints.csv: Aggregate evaluation metrics at checkpoint intervals
+    - per_domain_checkpoints.csv: Per-domain (time_of_day / road_condition /
+      road_type) mAP in long format, one row per (checkpoint, dimension,
+      bucket).  Only written if eval_metrics contains per-domain keys.
     - filter_stats.csv: Per-category filter selection statistics
     - decisions.csv: Per-frame accept/reject log
 
@@ -58,8 +60,10 @@ class StreamingMetricsLogger:
 
         self.metrics_file = self.log_dir / "streaming_metrics.csv"
         self.checkpoints_file = self.log_dir / "checkpoints.csv"
+        self.per_domain_checkpoints_file = self.log_dir / "per_domain_checkpoints.csv"
         self.filter_stats_file = self.log_dir / "filter_stats.csv"
         self.decisions_file = self.log_dir / "decisions.csv"
+        self._per_domain_header_written = False
 
         self.num_items_processed = 0
         self.num_forward_passes = 0
@@ -84,14 +88,6 @@ class StreamingMetricsLogger:
                 "optimizer_steps",
                 "elapsed_seconds",
                 "items_per_second",
-                "novel_accept_rate",
-                "redundant_reject_rate",
-                "categories_seen",
-                "novel_total",
-                "redundant_total",
-                "empty_total",
-                "empty_accepted",
-                "empty_rejected",
                 "avg_train_loss",
             ])
 
@@ -99,6 +95,7 @@ class StreamingMetricsLogger:
             csv.writer(f).writerow([
                 "checkpoint_idx",
                 "items_processed",
+                "optimizer_steps",
                 "mAP",
                 "mAP_50",
                 "mAP_75",
@@ -127,7 +124,6 @@ class StreamingMetricsLogger:
                 "filter_score",
                 "filter_threshold",
                 "categories",
-                "is_novel",
             ])
 
     def log_stream_item(
@@ -154,7 +150,6 @@ class StreamingMetricsLogger:
         filter_score: float,
         filter_threshold: Optional[float],
         categories: Set[str],
-        is_novel: bool,
     ) -> None:
         """Log a per-frame accept/reject decision."""
         elapsed = time.time() - self.start_time
@@ -169,7 +164,6 @@ class StreamingMetricsLogger:
                 f"{filter_score:.6f}",
                 (f"{filter_threshold:.6f}" if filter_threshold is not None else ""),
                 ";".join(sorted(categories)) if categories else "",
-                int(is_novel),
             ])
 
     def log_checkpoint(
@@ -178,7 +172,6 @@ class StreamingMetricsLogger:
         optimizer_steps: int,
         filter_stats: Optional[Dict[str, Any]] = None,
         buffer_stats: Optional[Dict[str, Any]] = None,
-        novelty_stats: Optional[Dict[str, Any]] = None,
         avg_train_loss: Optional[float] = None,
     ) -> None:
         """Log a checkpoint (periodic snapshot of metrics)."""
@@ -189,15 +182,6 @@ class StreamingMetricsLogger:
 
         buffer_flushes = buffer_stats.get("total_flushes", 0) if buffer_stats else 0
         buffer_total = buffer_stats.get("total_items_added", 0) if buffer_stats else 0
-
-        novel_accept_rate = novelty_stats.get("novel_accept_rate", 0.0) if novelty_stats else 0.0
-        redundant_reject_rate = novelty_stats.get("redundant_reject_rate", 0.0) if novelty_stats else 0.0
-        categories_seen = novelty_stats.get("categories_seen", 0) if novelty_stats else 0
-        novel_total = novelty_stats.get("novel_total", 0) if novelty_stats else 0
-        redundant_total = novelty_stats.get("redundant_total", 0) if novelty_stats else 0
-        empty_total = novelty_stats.get("empty_total", 0) if novelty_stats else 0
-        empty_accepted = novelty_stats.get("empty_accepted", 0) if novelty_stats else 0
-        empty_rejected = novelty_stats.get("empty_rejected", 0) if novelty_stats else 0
 
         self.last_optimizer_steps = optimizer_steps
 
@@ -214,14 +198,6 @@ class StreamingMetricsLogger:
                 optimizer_steps,
                 f"{elapsed:.2f}",
                 f"{items_per_sec:.2f}",
-                f"{novel_accept_rate:.4f}",
-                f"{redundant_reject_rate:.4f}",
-                categories_seen,
-                novel_total,
-                redundant_total,
-                empty_total,
-                empty_accepted,
-                empty_rejected,
                 f"{avg_train_loss:.6f}" if avg_train_loss is not None else "",
             ])
 
@@ -249,12 +225,18 @@ class StreamingMetricsLogger:
         checkpoint_idx: int,
         eval_metrics: Dict[str, float],
     ) -> None:
-        """Log evaluation metrics at a checkpoint."""
+        """Log evaluation metrics at a checkpoint.
+
+        Writes one row to checkpoints.csv (aggregate) and, if the metrics
+        dict contains per-domain keys of the form mAP_<dim>_<bucket>, one
+        long-format row per (dim, bucket) to per_domain_checkpoints.csv.
+        """
         elapsed = time.time() - self.start_time
 
         row = [
             checkpoint_idx,
             self.num_items_processed,
+            self.last_optimizer_steps,
             f"{eval_metrics.get('mAP', 0.0):.4f}",
             f"{eval_metrics.get('mAP_50', 0.0):.4f}",
             f"{eval_metrics.get('mAP_75', 0.0):.4f}",
@@ -267,6 +249,67 @@ class StreamingMetricsLogger:
 
         with open(self.checkpoints_file, "a", newline="") as f:
             csv.writer(f).writerow(row)
+
+        self._log_per_domain(checkpoint_idx, elapsed, eval_metrics)
+
+    def _log_per_domain(
+        self,
+        checkpoint_idx: int,
+        elapsed: float,
+        eval_metrics: Dict[str, float],
+    ) -> None:
+        """Emit long-format per-(dim, bucket) rows when present in metrics."""
+        # Match keys mAP_<dim>_<bucket> against known domain dimensions
+        # (dim names may contain underscores like time_of_day).
+        bucket_keys: List[tuple] = []
+        dim_prefixes = [(f"mAP_{d}_", d) for d in DEFAULT_DOMAIN_DIMS]
+        for key in eval_metrics:
+            for prefix, dim in dim_prefixes:
+                if key.startswith(prefix):
+                    bucket = key[len(prefix):]
+                    if bucket:
+                        bucket_keys.append((dim, bucket))
+                    break
+
+        if not bucket_keys:
+            return
+
+        if not self._per_domain_header_written:
+            with open(self.per_domain_checkpoints_file, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "checkpoint_idx",
+                    "items_processed",
+                    "optimizer_steps",
+                    "elapsed_seconds",
+                    "dimension",
+                    "bucket",
+                    "n_frames",
+                    "mAP",
+                    "mAP_50",
+                    "mAP_75",
+                ] + self._per_class_ap_cols)
+            self._per_domain_header_written = True
+
+        with open(self.per_domain_checkpoints_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            for dim, bucket in sorted(set(bucket_keys)):
+                tag = f"{dim}_{bucket}"
+                n = eval_metrics.get(f"n_{tag}", 0.0)
+                row = [
+                    checkpoint_idx,
+                    self.num_items_processed,
+                    self.last_optimizer_steps,
+                    f"{elapsed:.2f}",
+                    dim,
+                    bucket,
+                    int(n),
+                    f"{eval_metrics.get(f'mAP_{tag}', 0.0):.4f}",
+                    f"{eval_metrics.get(f'mAP_50_{tag}', 0.0):.4f}",
+                    f"{eval_metrics.get(f'mAP_75_{tag}', 0.0):.4f}",
+                ]
+                for cls in self._class_names:
+                    row.append(f"{eval_metrics.get(f'AP_{cls}_{tag}', 0.0):.4f}")
+                writer.writerow(row)
 
     def should_checkpoint(self) -> bool:
         return self.num_items_processed % self.checkpoint_interval == 0

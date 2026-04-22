@@ -4,6 +4,7 @@ Training loops for the two-phase streaming detection pipeline.
 Phase 1 -- Bootstrap:
     bootstrap_train()          Multi-epoch training on the first N frames
     collect_embeddings()       Extract backbone embeddings for bootstrap frames
+    collect_uncertainties()    Extract per-frame detection uncertainty scores
 
 Phase 2 -- Streaming:
     train_on_stream()          Single-pass buffer-based streaming training
@@ -140,9 +141,9 @@ def bootstrap_train(
         avg_loss = running_loss / max(n_batches, 1)
         epoch_logs.append({"epoch": epoch + 1, "avg_loss": avg_loss, "batches": n_batches})
         if epochs > 1:
-            print(f"  Epoch {epoch + 1}/{epochs} — avg loss: {avg_loss:.4f}")
+            print(f"  Epoch {epoch + 1}/{epochs} -- avg loss: {avg_loss:.4f}")
         else:
-            print(f"  {desc_prefix} — avg loss: {avg_loss:.4f}")
+            print(f"  {desc_prefix} -- avg loss: {avg_loss:.4f}")
 
     return epoch_logs, total_steps
 
@@ -153,6 +154,7 @@ def collect_embeddings(
     data_loader: DataLoader,
     device: torch.device,
     progress_bar: bool = True,
+    use_amp: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
     """
     Collect backbone embeddings for all frames in a DataLoader.
@@ -166,6 +168,9 @@ def collect_embeddings(
         data_loader: DataLoader over the frames to embed.
         device: Device to run on.
         progress_bar: Show progress bar.
+        use_amp: Run embedding forward pass under torch.cuda.amp.autocast
+            to speed up refresh; embeddings are cast back to float32 for
+            numerically stable mean/covariance/Mahalanobis computation.
 
     Returns:
         (mean, cov, count, scores): Mean vector (D,), covariance matrix
@@ -184,8 +189,9 @@ def collect_embeddings(
             continue
         images, _ = batch
         images = [img.to(device) for img in images]
-        emb = model.get_embedding(images)  # (B, D)
-        all_embeddings.append(emb.cpu())
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            emb = model.get_embedding(images)  # (B, D)
+        all_embeddings.append(emb.float().cpu())
 
     if was_training:
         model.train()
@@ -203,6 +209,105 @@ def collect_embeddings(
     )  # (N,) Mahalanobis distances
 
     return mean, cov, int(len(embeddings)), scores
+
+
+@torch.no_grad()
+def _frame_uncertainty_score(
+    scores: Optional[torch.Tensor], top_k: int, score_mode: str,
+) -> float:
+    """Single-frame uncertainty score from post-NMS box confidences.
+
+    Args:
+        scores: Per-box classification confidences, sorted descending, or
+            None for a frame with no detections.
+        top_k: Number of highest-confidence boxes used by the topk_mean
+            mode.  Ignored by the margin mode.
+        score_mode: Either "topk_mean" (uncertainty = 1 - mean of top-K
+            confidences) or "margin" (uncertainty = 1 - (top1 - top2);
+            reduces to 1 - top1 when only one detection is present).
+
+    Returns:
+        Float uncertainty score in [0, 1].  Frames with no detections
+        score 1.0 regardless of mode.
+    """
+    if scores is None or scores.numel() == 0:
+        return 1.0
+    s = scores.detach().float().cpu()
+
+    if score_mode == "topk_mean":
+        top = s[:top_k]
+        return float(max(0.0, min(1.0, 1.0 - top.mean().item())))
+
+    if score_mode == "margin":
+        top1 = float(s[0].item())
+        top2 = float(s[1].item()) if s.numel() >= 2 else 0.0
+        return float(max(0.0, min(1.0, 1.0 - (top1 - top2))))
+
+    raise ValueError(
+        f"Unknown score_mode: {score_mode!r}; expected 'topk_mean' or 'margin'."
+    )
+
+
+def collect_uncertainties(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    *,
+    top_k: int = 10,
+    score_mode: str = "topk_mean",
+    progress_bar: bool = True,
+) -> torch.Tensor:
+    """
+    Collect per-frame detection-uncertainty scores for all frames in a loader.
+
+    Runs the detector in eval mode and reduces each frame's post-NMS
+    classification confidences to a scalar uncertainty.  Two reductions
+    are supported, selected by score_mode:
+
+        topk_mean: score = 1 - mean(top_k box scores).  Low mean
+        confidence -> high uncertainty.
+
+        margin: score = 1 - (top1 - top2 box scores).  Two near-equal
+        top detections -> high uncertainty.  Falls back to 1 - top1 when
+        the frame has a single detection.
+
+    Scores are clamped to [0, 1].  Frames with zero detections score 1.0.
+
+    Args:
+        model: The detection model (eval mode enforced internally).
+        data_loader: DataLoader over the frames to score.
+        device: Device to run on.
+        top_k: Number of top-confidence detections used by topk_mean.
+        score_mode: "topk_mean" or "margin".  See above.
+        progress_bar: Show progress bar.
+
+    Returns:
+        Tensor of shape (N,) with per-frame uncertainty scores in [0, 1].
+    """
+    was_training = model.training
+    model.eval()
+
+    scores: List[float] = []
+    iterator = (
+        tqdm(data_loader, desc="Collecting uncertainties")
+        if progress_bar
+        else data_loader
+    )
+
+    for batch in iterator:
+        if batch is None:
+            continue
+        images, _ = batch
+        images = [img.to(device) for img in images]
+        preds = model(images)
+        for p in preds:
+            s = p.get("scores") if isinstance(p, dict) else None
+            scores.append(_frame_uncertainty_score(s, top_k, score_mode))
+
+    if was_training:
+        model.train()
+
+    return torch.tensor(scores, dtype=torch.float32)
 
 
 # =============================================================================
@@ -242,7 +347,6 @@ def train_on_stream(
     metrics_logger: Optional[StreamingMetricsLogger] = None,
     eval_fn: Optional[Callable[[nn.Module], Dict[str, Any]]] = None,
     eval_every_n_checkpoints: int = 1,
-    novelty_tracker: Optional[Any] = None,
     progress_bar: bool = True,
     total_items: Optional[int] = None,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
@@ -250,6 +354,11 @@ def train_on_stream(
     lr_warmup_items: int = 0,
     lr_min_factor: float = 0.1,
     best_model_dir: Optional[Path] = None,
+    refresh_every_flushes: int = 0,
+    on_refresh: Optional[Callable[[int, int], None]] = None,
+    decision_callback: Optional[
+        Callable[[int, str, str, str, float, Optional[float], Any], None]
+    ] = None,
 ) -> StreamingTrainResult:
     """
     Single-pass buffer-based streaming training.
@@ -280,7 +389,6 @@ def train_on_stream(
         metrics_logger: Optional logger for streaming metrics.
         eval_fn: Optional evaluation callback (model) -> metrics_dict.
         eval_every_n_checkpoints: Evaluate every N checkpoints.
-        novelty_tracker: Optional NoveltyTracker for novelty metrics.
         progress_bar: Show progress bar.
         total_items: Total expected items (for progress bar).
         scaler: Optional GradScaler for AMP.
@@ -288,6 +396,17 @@ def train_on_stream(
         lr_warmup_items: Items for linear LR warmup (requires base_lr).
         lr_min_factor: Final LR = base_lr * lr_min_factor (requires base_lr).
         best_model_dir: When set, saves best_model.pt on each new best mAP.
+        refresh_every_flushes: When > 0, call `on_refresh` after every K-th
+            buffer flush.  Ignored when on_refresh is None.
+        on_refresh: Callback invoked as on_refresh(items_processed,
+            buffer_flushes) after a flush that triggers a refresh.  The
+            callback owns the scoring-model + reference update.
+        decision_callback: Optional per-item hook for recording filter
+            decisions in addition to (or instead of) metrics_logger.
+            Called as decision_callback(global_idx, frame_id, action,
+            filter_metric, filter_score, filter_threshold, categories)
+            for every stream item.  Used by the federated pipeline to
+            write a shared decisions.csv across clients and rounds.
 
     Returns:
         StreamingTrainResult with processing statistics.
@@ -394,51 +513,75 @@ def train_on_stream(
         # Filter decision
         action, meta = filter_policy.select_action(stream_item, model, device)
 
-        if novelty_tracker is not None:
-            novelty_tracker.observe(stream_item.categories, action)
-
         if action == "accept":
             items_accepted += 1
             training_buffer.add(stream_item)
         else:
             items_rejected += 1
 
-        # Log per-item decision
-        if metrics_logger is not None:
-            forward_pass = filter_policy.requires_model_forward()
-            if "score" in meta:
+        # Derive filter decision metadata once; consumed by metrics_logger
+        # and/or decision_callback below.  The policy can declare its metric
+        # name via meta["metric"]; otherwise fall back to the legacy
+        # heuristic (distribution vs random vs none).
+        if metrics_logger is not None or decision_callback is not None:
+            if "metric" in meta and "score" in meta:
+                filter_metric = str(meta["metric"])
+                filter_score = float(meta["score"])
+            elif "score" in meta:
                 filter_metric = "distribution_score"
                 filter_score = float(meta["score"])
-            elif "uncertainty" in meta:
-                filter_metric = "uncertainty"
-                filter_score = float(meta["uncertainty"])
-            elif "grad_norm" in meta:
-                filter_metric = "grad_norm"
-                filter_score = float(meta["grad_norm"])
             elif "random_score" in meta:
                 filter_metric = "random_score"
                 filter_score = float(meta["random_score"])
             else:
                 filter_metric = "none"
                 filter_score = 0.0
-            filter_threshold = float(meta["threshold"]) if "threshold" in meta else None
-
-            metrics_logger.log_stream_item(action, forward_pass=forward_pass)
-            metrics_logger.log_decision(
-                global_idx=stream_item.metadata.get("global_idx", items_processed - 1),
-                checkpoint_idx=1 + ((items_processed - 1) // metrics_logger.checkpoint_interval),
-                frame_id=stream_item.metadata.get("frame_id", ""),
-                action=action,
-                filter_metric=filter_metric,
-                filter_score=filter_score,
-                filter_threshold=filter_threshold,
-                categories=stream_item.categories,
-                is_novel=(novelty_tracker.last_was_novel if novelty_tracker else False),
+            filter_threshold = (
+                float(meta["threshold"]) if "threshold" in meta else None
             )
+            global_idx = stream_item.metadata.get("global_idx", items_processed - 1)
+            frame_id = stream_item.metadata.get("frame_id", "")
+
+            if metrics_logger is not None:
+                forward_pass = filter_policy.requires_model_forward()
+                metrics_logger.log_stream_item(action, forward_pass=forward_pass)
+                metrics_logger.log_decision(
+                    global_idx=global_idx,
+                    checkpoint_idx=1
+                    + ((items_processed - 1) // metrics_logger.checkpoint_interval),
+                    frame_id=frame_id,
+                    action=action,
+                    filter_metric=filter_metric,
+                    filter_score=filter_score,
+                    filter_threshold=filter_threshold,
+                    categories=stream_item.categories,
+                )
+
+            if decision_callback is not None:
+                decision_callback(
+                    global_idx,
+                    frame_id,
+                    action,
+                    filter_metric,
+                    filter_score,
+                    filter_threshold,
+                    stream_item.categories,
+                )
 
         # Train when buffer is full
         if training_buffer.is_full():
             _train_on_current_buffer()
+
+            # Adaptive filter refresh: rebuild the scoring model and
+            # reference distribution after every K-th buffer flush so the
+            # notion of "in-distribution" follows the model and the
+            # recent accept history.
+            if (
+                on_refresh is not None
+                and refresh_every_flushes > 0
+                and training_buffer.total_flushes % refresh_every_flushes == 0
+            ):
+                on_refresh(items_processed, training_buffer.total_flushes)
 
         # Checkpoint and evaluation
         if metrics_logger is not None and metrics_logger.should_checkpoint():
@@ -446,14 +589,12 @@ def train_on_stream(
 
             filter_stats = filter_policy.get_stats()
             buffer_stats = training_buffer.get_stats()
-            novelty_stats = novelty_tracker.get_stats() if novelty_tracker else None
             checkpoint_loss = (running_train_loss / train_loss_steps) if train_loss_steps > 0 else None
             metrics_logger.log_checkpoint(
                 checkpoint_idx,
                 optimizer_steps,
                 filter_stats,
                 buffer_stats,
-                novelty_stats,
                 avg_train_loss=checkpoint_loss,
             )
             running_train_loss = 0.0
@@ -503,9 +644,6 @@ def train_on_stream(
             checkpoint_idx += 1
             filter_stats = filter_policy.get_stats()
             buffer_stats = training_buffer.get_stats()
-            novelty_stats = (
-                novelty_tracker.get_stats() if novelty_tracker else None
-            )
             checkpoint_loss = (
                 (running_train_loss / train_loss_steps)
                 if train_loss_steps > 0
@@ -513,7 +651,7 @@ def train_on_stream(
             )
             metrics_logger.log_checkpoint(
                 checkpoint_idx, optimizer_steps, filter_stats, buffer_stats,
-                novelty_stats, avg_train_loss=checkpoint_loss,
+                avg_train_loss=checkpoint_loss,
             )
             selection_stats = filter_policy.get_selection_stats()
             metrics_logger.log_filter_stats(checkpoint_idx, selection_stats)

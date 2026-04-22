@@ -34,6 +34,7 @@ from .datasets import (
     detection_collate,
     get_detection_augmentation,
     get_detection_transforms,
+    load_manifest,
 )
 from .items import StreamItem
 from .partitioning import partition_frames, partition_frames_by_domain
@@ -53,4 +54,5 @@ __all__ = [
     "detection_collate",
     "get_detection_augmentation",
     "get_detection_transforms",
+    "load_manifest",
 ]

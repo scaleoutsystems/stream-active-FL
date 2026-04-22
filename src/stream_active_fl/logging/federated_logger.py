@@ -8,13 +8,19 @@ Detection columns align with offline (epochs.csv) and streaming (checkpoints.csv
 - Aggregate: mAP, mAP_50, mAP_75
 - Counts: num_items, total_predictions, total_ground_truth
 - Per-class: AP_Vehicle, AP_VulnerableVehicle, ... (from CATEGORY_ID_TO_NAME)
+
+Per-frame filter decisions are written to decisions.csv by
+FederatedDecisionsLogger, mirroring the streaming decisions log with
+additional round and client_id columns.
 """
 
 from __future__ import annotations
 
 import csv
+import threading
+import time
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Set
 
 from ..core import CATEGORY_ID_TO_NAME
 
@@ -91,3 +97,62 @@ class FederatedMetricsLogger:
 
         with open(self.rounds_file, "a", newline="") as f:
             csv.writer(f).writerow(row)
+
+
+class FederatedDecisionsLogger:
+    """Per-frame accept/reject log for federated runs.
+
+    Writes decisions.csv in the run directory with the same schema as the
+    streaming logger plus round and client_id columns.  One instance is
+    shared across all clients and rounds; log_decision is guarded by a
+    lock so concurrent clients do not interleave rows.
+    """
+
+    def __init__(self, log_dir: str | Path):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.decisions_file = self.log_dir / "decisions.csv"
+        self._lock = threading.Lock()
+        self._start_time = time.time()
+        with open(self.decisions_file, "w", newline="") as f:
+            csv.writer(f).writerow([
+                "round",
+                "client_id",
+                "global_idx",
+                "elapsed_seconds",
+                "frame_id",
+                "action",
+                "filter_metric",
+                "filter_score",
+                "filter_threshold",
+                "categories",
+            ])
+
+    def log_decision(
+        self,
+        round_idx: int,
+        client_id: int,
+        global_idx: int,
+        frame_id: str,
+        action: str,
+        filter_metric: str,
+        filter_score: float,
+        filter_threshold: Optional[float],
+        categories: Set[str],
+    ) -> None:
+        elapsed = time.time() - self._start_time
+        row = [
+            round_idx,
+            client_id,
+            global_idx,
+            f"{elapsed:.2f}",
+            frame_id,
+            action,
+            filter_metric,
+            f"{filter_score:.6f}",
+            (f"{filter_threshold:.6f}" if filter_threshold is not None else ""),
+            ";".join(sorted(categories)) if categories else "",
+        ]
+        with self._lock:
+            with open(self.decisions_file, "a", newline="") as f:
+                csv.writer(f).writerow(row)

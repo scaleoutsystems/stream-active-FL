@@ -27,18 +27,31 @@ mkdir -p "$STREAM_ACTIVE_FL_PREPROCESSED_ROOT/logs"
 python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__version__}  cuda={torch.cuda.is_available()}')"
 
 # Pass CONFIG_FILE at submit time to select experiment:
-#   sbatch --export=ALL,CONFIG_FILE=configs/streaming_distribution_filter.yaml slurm/train_streaming.sbatch
-# Optional: also pass BOOTSTRAP_RUN_DIR to skip bootstrap:
-#   sbatch --export=ALL,CONFIG_FILE=configs/streaming_distribution_filter.yaml,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter/<run_id> slurm/train_streaming.sbatch
-CONFIG_FILE="${CONFIG_FILE:-configs/streaming_no_filter.yaml}"
+#   sbatch --export=ALL,CONFIG_FILE=configs/streaming/dist_thresh_cityday_road_type_p10.yaml slurm/train_streaming.sbatch
+# Optional SEED override (nests run under seed_<N>/<timestamp>/):
+#   sbatch --export=ALL,CONFIG_FILE=...,SEED=43 slurm/train_streaming.sbatch
+# Optional BOOTSTRAP_RUN_DIR to skip bootstrap:
+#   sbatch --export=ALL,CONFIG_FILE=...,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter_cityday_road_type/<run_id> slurm/train_streaming.sbatch
+CONFIG_FILE="${CONFIG_FILE:-configs/streaming/no_filter_cityday_road_type.yaml}"
 echo "Config: $CONFIG_FILE"
 
+CMD=(python experiments/streaming_detection.py --config "$CONFIG_FILE")
 if [[ -n "${BOOTSTRAP_RUN_DIR:-}" ]]; then
+  # Resolve globs (e.g. "outputs/.../seed_43/*") to the newest matching dir,
+  # so dependent jobs can be queued before the producing run exists.
+  if [[ "$BOOTSTRAP_RUN_DIR" == *"*"* ]]; then
+    CANDIDATE=$(ls -1dt $BOOTSTRAP_RUN_DIR 2>/dev/null | head -n1 || true)
+    if [[ -z "$CANDIDATE" ]]; then
+      echo "ERROR: no directory matches BOOTSTRAP_RUN_DIR pattern: $BOOTSTRAP_RUN_DIR" >&2
+      exit 1
+    fi
+    BOOTSTRAP_RUN_DIR="$CANDIDATE"
+  fi
   echo "Reusing bootstrap: $BOOTSTRAP_RUN_DIR"
-  python experiments/streaming_detection.py \
-    --config "$CONFIG_FILE" \
-    --bootstrap-run-dir "$BOOTSTRAP_RUN_DIR"
-else
-  python experiments/streaming_detection.py \
-    --config "$CONFIG_FILE"
+  CMD+=(--bootstrap-run-dir "$BOOTSTRAP_RUN_DIR")
 fi
+if [[ -n "${SEED:-}" ]]; then
+  echo "Seed override: $SEED"
+  CMD+=(--seed "$SEED")
+fi
+"${CMD[@]}"

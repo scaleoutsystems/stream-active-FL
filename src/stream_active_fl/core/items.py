@@ -26,8 +26,8 @@ class StreamItem:
             and "labels" (Int64Tensor[N], 1-indexed with 0 reserved for
             background).
         categories: Set of category names present in this frame (e.g.
-            {"Vehicle", "Pedestrian"}). Used by the NoveltyTracker to
-            decide whether a frame introduces a previously-unseen class.
+            {"Vehicle", "Pedestrian"}).  Surfaced in per-category filter
+            statistics so we can see what the filter selects.
         metadata: Dict with provenance info (frame_id, global_idx, etc.).
     """
 

@@ -59,17 +59,33 @@ def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
 # =============================================================================
 
 
-def create_run_dir(base_output_dir: Path) -> Path:
-    """Create a timestamped run directory under base_output_dir."""
+def create_run_dir(base_output_dir: Path, seed: int | None = None) -> Path:
+    """Create a timestamped run directory under base_output_dir.
+
+    When seed is provided, the run is nested under seed_<N>/ so that
+    multi-seed experiments can coexist cleanly under the same base dir:
+        outputs/<exp>/seed_<N>/<timestamp>/
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = base_output_dir / timestamp
+    if seed is not None:
+        run_dir = base_output_dir / f"seed_{seed}" / timestamp
+    else:
+        run_dir = base_output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
-def setup_run_dir(project_root: Path, output_dir: str | Path, config_path: Path) -> Path:
-    """Create run directory under output_dir and copy config there."""
-    run_dir = create_run_dir(project_root / Path(output_dir))
+def setup_run_dir(
+    project_root: Path,
+    output_dir: str | Path,
+    config_path: Path,
+    seed: int | None = None,
+) -> Path:
+    """Create run directory under output_dir and copy config there.
+
+    Optionally nests under seed_<N>/ when seed is provided.
+    """
+    run_dir = create_run_dir(project_root / Path(output_dir), seed=seed)
     shutil.copy(config_path, run_dir / "config.yaml")
     return run_dir
 

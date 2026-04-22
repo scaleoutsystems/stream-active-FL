@@ -319,6 +319,7 @@ class DetectionDataset(Dataset):
         frame_range: Optional[Tuple[int, Optional[int]]] = None,
         target_classes: Optional[List[str]] = None,
         verbose: bool = True,
+        frame_entries: Optional[List[Dict[str, Any]]] = None,
     ):
         self.manifest_path = Path(manifest_path)
         self.base_dir = self.manifest_path.parent
@@ -328,16 +329,23 @@ class DetectionDataset(Dataset):
         self.min_box_area = min_box_area
         self.class_mapping = build_class_mapping(target_classes)
 
-        manifest = load_manifest(self.manifest_path)
-        all_frames = manifest["frames"]
+        if frame_entries is not None:
+            # Explicit subset: used by the scoring-model refresher to
+            # re-embed (bootstrap + sliding window) without re-reading
+            # or re-slicing the manifest.  The split filter is bypassed
+            # because entries are already pre-selected.
+            self.frames = list(frame_entries)
+        else:
+            manifest = load_manifest(self.manifest_path)
+            all_frames = manifest["frames"]
 
-        split_frames = [f for f in all_frames if f["split"] == split]
+            split_frames = [f for f in all_frames if f["split"] == split]
 
-        if frame_range is not None:
-            start, end = frame_range
-            split_frames = split_frames[start:end]
+            if frame_range is not None:
+                start, end = frame_range
+                split_frames = split_frames[start:end]
 
-        self.frames = split_frames
+            self.frames = split_frames
 
         if verbose:
             self._print_summary()

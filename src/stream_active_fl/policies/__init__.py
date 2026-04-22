@@ -1,18 +1,22 @@
-"""
-Decision policies for selective training in buffer-based stream learning.
+"""Filter policies for streaming and federated experiments.
 
-Policies determine which stream items should be accepted (added to the
-training buffer) or rejected (discarded).
+Public surface:
 
-Available policies:
-    NoFilterPolicy             Accept every item (baseline)
-    RandomPolicy               Accept each item with fixed probability (random baseline)
-    DistributionBasedPolicy    Accept items on the tail of the embedding distribution
-    UncertaintyBasedPolicy     Accept items with high prediction uncertainty
-    GradientNormPolicy         Accept items with largest parameter gradient norms
+    NoFilterPolicy             Accept everything (baseline).
+    RandomPolicy               Accept with fixed probability (baseline).
+    DistributionBasedPolicy    Mahalanobis on backbone embeddings, optionally
+                               refreshed via a sliding window or reservoir.
+    DetectionUncertaintyPolicy Top-K mean or top1-top2 margin on post-NMS
+                               confidences, optionally refreshed.
+    MixturePolicy              Epsilon-greedy mixture of a signal-based inner
+                               policy and random acceptance.
 
-Factory:
-    create_filter_policy       Build a FilterPolicy from an experiment config
+    ScoringRefresher           Periodic re-scoring of the reference under a
+                               fresh snapshot of the live training model.
+    pool_recent_accepted       Pool per-client reservoirs into a fleet-wide
+                               reference (federated).
+
+    create_filter_policy       Build a FilterPolicy from an experiment config.
 """
 
 from __future__ import annotations
@@ -23,106 +27,159 @@ import torch
 
 from .filtering import (
     Action,
+    DetectionUncertaintyPolicy,
     DistributionBasedPolicy,
     FilterPolicy,
     FilterResult,
-    GradientNormPolicy,
+    MixturePolicy,
     NoFilterPolicy,
     RandomPolicy,
-    UncertaintyBasedPolicy,
 )
+from .refresh import RefreshRecord, ScoringRefresher, pool_recent_accepted
 
 
 def create_filter_policy(
     config: Any,
     bootstrap_mean: Optional[torch.Tensor] = None,
     bootstrap_cov: Optional[torch.Tensor] = None,
-    bootstrap_count: int = 0,
     scoring_model: Optional[torch.nn.Module] = None,
     bootstrap_scores: Optional[List[float]] = None,
+    reservoir_seed_override: Optional[int] = None,
 ) -> FilterPolicy:
-    """
-    Create a filter policy from an experiment config dataclass.
+    """Create a filter policy from an experiment config dataclass.
 
     Args:
-        config: Experiment config with filter_policy field and
-            policy-specific parameters.
-        bootstrap_mean: Mean embedding from bootstrap phase (required
-            for distribution-based policy).
-        bootstrap_cov: Covariance matrix from bootstrap phase (optional,
-            used by distribution-based policy in mahalanobis mode).
-        bootstrap_count: Number of bootstrap samples used to compute
-            bootstrap_mean/bootstrap_cov.
-        scoring_model: Optional frozen model snapshot for computing
-            embeddings.  When provided, the distribution-based policy
-            uses this model (not the live training model) so that
-            distance scores remain in a stable embedding space.
-        bootstrap_scores: Per-frame Mahalanobis distances computed over
-            the bootstrap data.  When provided, used to calibrate the
-            threshold directly (no warmup needed).
+        config: Experiment config with a filter_policy field and
+            policy-specific parameters.  Supported filter_policy values:
+            "none", "random", "distribution", "uncertainty",
+            "mixed_distribution", "mixed_uncertainty".
+        bootstrap_mean: Mean embedding from bootstrap phase.  Required
+            for distribution-based policies (plain or mixed).
+        bootstrap_cov: Covariance matrix from bootstrap phase.  Required
+            for distribution-based policies (plain or mixed).
+        scoring_model: Frozen model snapshot for per-frame scoring.
+            Required for every signal-based policy (plain or mixed) so
+            the score lives in a stable model state.
+        bootstrap_scores: Per-frame reference scores for threshold
+            calibration.  Mahalanobis distances for distribution
+            policies; per-frame uncertainty scores for uncertainty
+            policies.  The caller is responsible for producing them in
+            the matching space (see collect_embeddings and
+            collect_uncertainties).
+        reservoir_seed_override: If given, overrides config.seed as the
+            reservoir-sampler and mixture-routing seed.  Federated
+            callers pass a client-unique value so per-client reservoirs
+            and mixture draws are independent.
 
     Returns:
         Configured FilterPolicy instance.
     """
-    if config.filter_policy == "none":
+    policy = config.filter_policy
+
+    if policy == "none":
         return NoFilterPolicy()
 
-    elif config.filter_policy == "random":
+    if policy == "random":
         return RandomPolicy(accept_fraction=config.accept_fraction)
 
-    elif config.filter_policy == "distribution":
-        if bootstrap_mean is None:
+    def _build_distribution() -> DistributionBasedPolicy:
+        if bootstrap_mean is None or bootstrap_cov is None:
             raise ValueError(
-                "Distribution-based policy requires bootstrap_mean. "
-                "Run bootstrap training first."
+                "Distribution-based policy requires bootstrap_mean and "
+                "bootstrap_cov.  Run bootstrap training first."
+            )
+        if scoring_model is None:
+            raise ValueError(
+                "Distribution-based policy requires a frozen scoring_model "
+                "(pass a deepcopy of the bootstrap model)."
+            )
+        if not bootstrap_scores:
+            raise ValueError(
+                "Distribution-based policy requires bootstrap_scores to "
+                "calibrate the threshold."
             )
         return DistributionBasedPolicy(
             bootstrap_mean=bootstrap_mean,
             bootstrap_cov=bootstrap_cov,
-            bootstrap_count=bootstrap_count,
-            mode=config.distribution_mode,
-            accept_fraction=config.accept_fraction,
-            budget_mode=getattr(config, "budget_mode", "adaptive"),
-            score_window_size=config.score_window_size,
-            warmup_items=config.warmup_items,
-            embedding_buffer_size=config.embedding_buffer_size,
-            knn_k=config.knn_k,
-            update_stats=config.update_distribution_stats,
-            threshold_percentile=getattr(config, "threshold_percentile", 0.5),
-            threshold_ema_alpha=getattr(config, "threshold_ema_alpha", 0.0),
-            total_stream_items=getattr(config, "total_stream_items", 0),
             scoring_model=scoring_model,
             bootstrap_scores=bootstrap_scores,
-        )
-
-    elif config.filter_policy == "uncertainty":
-        return UncertaintyBasedPolicy(
             accept_fraction=config.accept_fraction,
-            score_window_size=config.score_window_size,
-            warmup_items=config.warmup_items,
-            confidence_threshold=config.confidence_threshold,
-            top_k_detections=config.top_k_detections,
+            threshold_percentile=getattr(config, "threshold_percentile", 0.10),
+            refresh_window_size=getattr(config, "scoring_refresh_window_size", 0),
+            reservoir_size=getattr(config, "scoring_refresh_reservoir_size", 0),
+            reservoir_seed=(
+                reservoir_seed_override
+                if reservoir_seed_override is not None
+                else getattr(config, "seed", None)
+            ),
         )
 
-    elif config.filter_policy == "gradient_norm":
-        return GradientNormPolicy(
+    def _build_uncertainty() -> DetectionUncertaintyPolicy:
+        if scoring_model is None:
+            raise ValueError(
+                "DetectionUncertaintyPolicy requires a frozen scoring_model "
+                "(pass a deepcopy of the bootstrap model)."
+            )
+        if not bootstrap_scores:
+            raise ValueError(
+                "DetectionUncertaintyPolicy requires bootstrap_scores "
+                "(per-frame detector uncertainty scores) to calibrate the "
+                "threshold.  Run collect_uncertainties over the bootstrap "
+                "frames before constructing the policy."
+            )
+        return DetectionUncertaintyPolicy(
+            scoring_model=scoring_model,
+            bootstrap_scores=bootstrap_scores,
+            threshold_percentile=getattr(config, "threshold_percentile", 0.15),
             accept_fraction=config.accept_fraction,
-            norm_window_size=config.norm_window_size,
-            warmup_items=config.warmup_items,
+            top_k=getattr(config, "uncertainty_top_k", 10),
+            score_mode=getattr(config, "uncertainty_score_mode", "topk_mean"),
+            refresh_window_size=getattr(config, "scoring_refresh_window_size", 0),
+            reservoir_size=getattr(config, "scoring_refresh_reservoir_size", 0),
+            reservoir_seed=(
+                reservoir_seed_override
+                if reservoir_seed_override is not None
+                else getattr(config, "seed", None)
+            ),
         )
 
-    else:
-        raise ValueError(f"Unknown filter policy: {config.filter_policy}")
+    if policy == "distribution":
+        return _build_distribution()
+
+    if policy == "uncertainty":
+        return _build_uncertainty()
+
+    if policy in ("mixed_distribution", "mixed_uncertainty"):
+        inner: FilterPolicy = (
+            _build_distribution()
+            if policy == "mixed_distribution"
+            else _build_uncertainty()
+        )
+        return MixturePolicy(
+            inner=inner,
+            mixture_gamma=getattr(config, "mixture_gamma", 0.5),
+            accept_fraction=config.accept_fraction,
+            rng_seed=(
+                reservoir_seed_override
+                if reservoir_seed_override is not None
+                else getattr(config, "seed", None)
+            ),
+        )
+
+    raise ValueError(f"Unknown filter policy: {policy}")
 
 
 __all__ = [
     "Action",
+    "DetectionUncertaintyPolicy",
     "DistributionBasedPolicy",
     "FilterPolicy",
     "FilterResult",
-    "GradientNormPolicy",
+    "MixturePolicy",
     "NoFilterPolicy",
     "RandomPolicy",
-    "UncertaintyBasedPolicy",
+    "RefreshRecord",
+    "ScoringRefresher",
     "create_filter_policy",
+    "pool_recent_accepted",
 ]

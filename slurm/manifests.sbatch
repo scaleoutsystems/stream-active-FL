@@ -32,10 +32,21 @@ LOG_DIR="$STREAM_ACTIVE_FL_PREPROCESSED_ROOT/logs"
 DATA_DIR="$STREAM_ACTIVE_FL_PREPROCESSED_ROOT/Frames_1600x480"
 mkdir -p "$LOG_DIR"
 
-srun python tools/preprocessing/build_manifests.py \
-  --data-dir "$DATA_DIR" \
-  --zod-root "$STREAM_ACTIVE_FL_ZOD_ROOT" \
-  --zod-version full \
-  --variants base temporal road_type road_type_reverse road_type_time conditions urban_rural \
-  --generate-bootstraps \
-  --generate-shared-manifests
+# Default: full regeneration at legacy bootstrap size (5000).
+# To regenerate bootstraps + shared manifests at an alternative size,
+# override VARIANTS and BOOTSTRAP_N, e.g.:
+#   sbatch --export=ALL,VARIANTS="",BOOTSTRAP_N=2000 slurm/manifests.sbatch
+# (VARIANTS="" skips the ordering-only manifests, which do not depend on
+#  bootstrap size and are unchanged.)
+VARIANTS="${VARIANTS:-base temporal road_type road_type_reverse road_type_time conditions urban_rural cityday_curated}"
+BOOTSTRAP_N="${BOOTSTRAP_N:-5000}"
+
+CMD=(python tools/preprocessing/build_manifests.py
+     --data-dir "$DATA_DIR"
+     --zod-root "$STREAM_ACTIVE_FL_ZOD_ROOT"
+     --zod-version full
+     --bootstrap-n "$BOOTSTRAP_N"
+     --generate-bootstraps
+     --generate-shared-manifests
+     --variants $VARIANTS)
+srun "${CMD[@]}"

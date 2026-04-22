@@ -14,16 +14,16 @@
 #
 # Arguments are <type> <config> pairs:
 #   sbatch slurm/run_parallel.sbatch \
-#     streaming configs/streaming_random_filter.yaml \
-#     streaming configs/streaming_uncertainty_filter.yaml \
-#     streaming configs/streaming_gradient_norm_filter.yaml \
-#     streaming configs/streaming_distribution_filter.yaml
+#     streaming configs/streaming/adaptive_cityday_road_type_p10.yaml \
+#     streaming configs/streaming/adaptive_citymix_road_type_p10.yaml \
+#     streaming configs/streaming/adaptive_citymix_conditions_p10.yaml
 #
-# Optional: reuse a bootstrap run across all experiments:
-#   sbatch --export=ALL,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter/<run_id> \
-#     slurm/run_parallel.sbatch \
-#     streaming configs/streaming_random_filter.yaml \
-#     streaming configs/streaming_uncertainty_filter.yaml
+# Optional SEED override (applied to every experiment):
+#   sbatch --export=ALL,SEED=43 slurm/run_parallel.sbatch streaming <cfg1> streaming <cfg2>
+#
+# Optional BOOTSTRAP_RUN_DIR override (applied to every experiment):
+#   sbatch --export=ALL,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter_cityday_road_type/<run_id> \
+#     slurm/run_parallel.sbatch streaming <cfg1> streaming <cfg2>
 #
 # Supported types: streaming, federated
 
@@ -90,19 +90,20 @@ for i in $(seq 0 $((NUM_EXPERIMENTS - 1))); do
   CONFIG_NAME=$(basename "$CONFIG" .yaml)
   LOGFILE="$LOG_DIR/${CONFIG_NAME}_${SLURM_JOB_ID}"
 
-  echo "  GPU $i (device ${GPU_IDS[$i]}): $TYPE — $CONFIG"
+  echo "  GPU $i (device ${GPU_IDS[$i]}): $TYPE -- $CONFIG"
   echo "         logs: ${LOGFILE}.{out,err}"
 
+  EXTRA_ARGS=()
   if [[ -n "${BOOTSTRAP_RUN_DIR:-}" ]]; then
-    CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" OMP_NUM_THREADS=2 \
-      python "$SCRIPT" --config "$CONFIG" \
-      --bootstrap-run-dir "$BOOTSTRAP_RUN_DIR" \
-      > "${LOGFILE}.out" 2> "${LOGFILE}.err" &
-  else
-    CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" OMP_NUM_THREADS=2 \
-      python "$SCRIPT" --config "$CONFIG" \
-      > "${LOGFILE}.out" 2> "${LOGFILE}.err" &
+    EXTRA_ARGS+=(--bootstrap-run-dir "$BOOTSTRAP_RUN_DIR")
   fi
+  if [[ -n "${SEED:-}" ]]; then
+    EXTRA_ARGS+=(--seed "$SEED")
+  fi
+
+  CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" OMP_NUM_THREADS=2 \
+    python "$SCRIPT" --config "$CONFIG" "${EXTRA_ARGS[@]}" \
+    > "${LOGFILE}.out" 2> "${LOGFILE}.err" &
 
   PIDS+=($!)
 done
@@ -118,7 +119,7 @@ for i in $(seq 0 $((NUM_EXPERIMENTS - 1))); do
   if wait "${PIDS[$i]}"; then
     echo "  GPU $i: DONE  ($CONFIG)"
   else
-    echo "  GPU $i: FAILED ($CONFIG) — check logs"
+    echo "  GPU $i: FAILED ($CONFIG) -- check logs"
     FAILED=$((FAILED + 1))
   fi
 done

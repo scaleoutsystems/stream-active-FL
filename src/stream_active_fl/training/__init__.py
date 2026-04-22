@@ -11,6 +11,7 @@ from .streaming import (
     StreamingTrainResult,
     bootstrap_train,
     collect_embeddings,
+    collect_uncertainties,
     train_on_stream,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "StreamingTrainResult",
     "bootstrap_train",
     "collect_embeddings",
+    "collect_uncertainties",
     "fedavg",
     "train_on_stream",
 ]

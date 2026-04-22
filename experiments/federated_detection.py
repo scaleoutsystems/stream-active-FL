@@ -1,13 +1,22 @@
-"""
-Simulated federated learning for streaming object detection.
+"""Simulated federated learning for streaming object detection.
 
 Pipeline:
-  Phase 1 (Bootstrap): optional shared bootstrap model on first N frames.
-  Phase 2 (Federated): partition the remaining stream across clients, run
-      local streaming updates, aggregate with FedAvg each round.
+    Phase 1 (Bootstrap): optional shared bootstrap model on the first N
+    frames; reusable across runs via bootstrap_run_dir.
+
+    Phase 2 (Federated): partition the remaining stream across clients,
+    run local streaming updates, aggregate with FedAvg each round.
+    Supports static and adaptive distribution filters; adaptive mode
+    periodically snapshots the post-aggregation global model into the
+    scoring model and recomputes one fleet-wide reference over the
+    bootstrap frames plus a fleet-wide sample of recent accepts.
 
 Usage:
-    python experiments/federated_detection.py --config configs/federated_no_filter.yaml
+    python experiments/federated_detection.py \\
+        --config configs/federated/fed_no_filter_cityday_road_type.yaml
+    python experiments/federated_detection.py \\
+        --config configs/federated/fed_adaptive_cityday_road_type_p15.yaml \\
+        --bootstrap-run-dir outputs/federated/fed_no_filter_cityday_road_type/seed_42/<timestamp>
 """
 
 from __future__ import annotations
@@ -15,6 +24,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import random
 import shutil
 import sys
 import time
@@ -38,6 +48,7 @@ from stream_active_fl.core import (
     detection_collate,
     get_detection_augmentation,
     get_detection_transforms,
+    load_manifest,
     partition_frames,
     partition_frames_by_domain,
 )
@@ -49,12 +60,19 @@ from stream_active_fl.experiment import (
     setup_run_dir,
 )
 from stream_active_fl.logging import (
+    FederatedDecisionsLogger,
     FederatedMetricsLogger,
     log_gpu_memory,
     save_run_info,
 )
 from stream_active_fl.memory import TrainingBuffer
-from stream_active_fl.policies import create_filter_policy
+from stream_active_fl.policies import (
+    DistributionBasedPolicy,
+    RefreshRecord,
+    ScoringRefresher,
+    create_filter_policy,
+    pool_recent_accepted,
+)
 from stream_active_fl.training import bootstrap_train, collect_embeddings, fedavg, train_on_stream
 from stream_active_fl.utils import set_seed, worker_init_fn
 
@@ -104,28 +122,35 @@ class FederatedDetectionConfig:
     mini_batch_size: int = 8
     shuffle_buffer_each_epoch: bool = True
 
-    # Augmentation
+    # Augmentation.  Applied to bootstrap training only; the bootstrap
+    # embedding-collection pass and every client's streaming phase use
+    # un-augmented frames so the (shared) filter scorer sees deterministic
+    # inputs.
     augment: bool = True
     hflip_prob: float = 0.5
     color_jitter: bool = True
 
-    # Filtering policy (per-client)
-    # Reuses the same streaming filter policies as centralized experiments.
-    filter_policy: Literal["none", "random", "distribution", "uncertainty", "gradient_norm"] = "none"
-    accept_fraction: float = 0.3
-    warmup_items: int = 200
-    score_window_size: int = 500
-    distribution_mode: Literal["mahalanobis", "cosine", "knn"] = "mahalanobis"
-    budget_mode: Literal["adaptive", "fixed_threshold", "global_budget"] = "adaptive"
-    embedding_buffer_size: int = 1000
-    knn_k: int = 10
-    update_distribution_stats: bool = True
-    threshold_percentile: float = 0.5
-    threshold_ema_alpha: float = 0.0
-    total_stream_items: int = 0
-    confidence_threshold: float = 0.1
-    top_k_detections: int = 5
-    norm_window_size: int = 500
+    # Filtering policy (per-client).  Shares definitions with streaming.
+    # - "none":         accept every frame (no_filter baseline)
+    # - "random":       accept each frame with probability accept_fraction
+    # - "distribution": Mahalanobis-distance filter with bootstrap-calibrated
+    #                   threshold (optionally adaptive via scoring_refresh_*)
+    filter_policy: Literal["none", "random", "distribution"] = "none"
+    accept_fraction: float = 0.10
+    threshold_percentile: float = 0.10
+
+    # Adaptive filter refresh.  Set scoring_refresh_every_rounds > 0 to
+    # enable: every K rounds the scoring model is replaced with a snapshot
+    # of the post-aggregation global model and the reference (mean/cov/
+    # threshold) is recomputed over the bootstrap frames plus the last M
+    # accepted stream frames pooled across clients.  A single scoring model /
+    # reference / threshold is broadcast to every client's policy
+    # ("server-issued novelty definition").  Defaults recover the static
+    # frozen filter baseline.
+    scoring_refresh_every_rounds: int = 0
+    scoring_refresh_window_size: int = 0
+    scoring_refresh_reservoir_size: int = 0
+    scoring_refresh_batch_size: int = 16
 
     # Evaluation
     eval_every_n_rounds: int = 1
@@ -161,12 +186,11 @@ def _bootstrap_or_reuse(
     train_augmentation,
     device: torch.device,
     scaler: torch.cuda.amp.GradScaler,
-) -> tuple[nn.Module, Optional[torch.Tensor], Optional[torch.Tensor], int, Optional[torch.Tensor], Optional[Path]]:
+) -> tuple[nn.Module, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[Path]]:
     requires_bootstrap_embeddings = (config.filter_policy == "distribution")
     bootstrap_source: Optional[Path] = None
     embedding_mean: Optional[torch.Tensor] = None
     embedding_cov: Optional[torch.Tensor] = None
-    embedding_count = 0
     bootstrap_scores: Optional[torch.Tensor] = None
 
     if config.bootstrap_run_dir:
@@ -178,10 +202,13 @@ def _bootstrap_or_reuse(
         embed_path = bootstrap_source / "bootstrap_embeddings.pt"
         if not model_path.exists():
             raise FileNotFoundError(f"Bootstrap model not found: {model_path}")
-        if requires_bootstrap_embeddings and not embed_path.exists():
-            raise FileNotFoundError(
-                f"Bootstrap embeddings required for distribution policy, not found: {embed_path}"
-            )
+        # If the source was a non-distribution run (e.g. no_filter), it will
+        # not have bootstrap_embeddings.pt; we recompute them below from the
+        # loaded model since they are a deterministic function of (weights,
+        # bootstrap frames, transforms, target_classes, min_box_area).
+        recompute_embeddings = (
+            requires_bootstrap_embeddings and not embed_path.exists()
+        )
 
         print("\n" + "=" * 60)
         print("Phase 1: Loading Shared Bootstrap")
@@ -194,37 +221,72 @@ def _bootstrap_or_reuse(
         model = model.to(device)
         print(f"Loaded bootstrap model from {model_path.name}")
 
-        if requires_bootstrap_embeddings:
+        if requires_bootstrap_embeddings and not recompute_embeddings:
             embed_data = torch.load(embed_path, map_location="cpu", weights_only=True)
-            if "count" not in embed_data:
+            if "scores" not in embed_data:
                 raise KeyError(
-                    "bootstrap_embeddings.pt is missing required key 'count'. "
+                    "bootstrap_embeddings.pt is missing required key 'scores'. "
                     "Regenerate bootstrap embeddings with current code."
                 )
             embedding_mean = embed_data["mean"]
             embedding_cov = embed_data["cov"]
-            embedding_count = int(embed_data["count"])
-            if "scores" in embed_data:
-                bootstrap_scores = embed_data["scores"]
-                assert bootstrap_scores is not None
-                print(f"Loaded bootstrap scores: {bootstrap_scores.shape}")
-            else:
-                print(
-                    "WARNING: bootstrap_embeddings.pt has no 'scores' key — "
-                    "threshold will be calibrated from warmup instead. "
-                    "Re-run bootstrap to enable bootstrap-calibrated thresholds."
-                )
+            bootstrap_scores = embed_data["scores"]
+            assert bootstrap_scores is not None
             assert embedding_mean is not None and embedding_cov is not None
             print(
                 "Loaded embeddings:"
-                f" mean {embedding_mean.shape}, cov {embedding_cov.shape}, n={embedding_count}"
+                f" mean {embedding_mean.shape}, cov {embedding_cov.shape},"
+                f" scores {bootstrap_scores.shape}"
+            )
+        elif recompute_embeddings:
+            print(
+                f"  NOTE: {embed_path.name} not found at source; "
+                f"recomputing embeddings from bootstrap_model.pt over the "
+                f"first {config.bootstrap_frames} train frames (unaugmented)."
+            )
+            embed_dataset = DetectionDataset(
+                manifest_path=manifest_path,
+                split="train",
+                transform=train_transform,
+                augmentation=None,
+                frame_range=(0, config.bootstrap_frames),
+                min_box_area=config.min_box_area,
+                target_classes=config.target_classes,
+                verbose=False,
+            )
+            embed_loader = torch.utils.data.DataLoader(
+                embed_dataset,
+                batch_size=config.bootstrap_batch_size,
+                shuffle=False,
+                num_workers=config.num_workers,
+                collate_fn=detection_collate,
+                worker_init_fn=worker_init_fn,
+                pin_memory=device.type == "cuda",
+            )
+            embedding_mean, embedding_cov, _embedding_count, bootstrap_scores = (
+                collect_embeddings(model, embed_loader, device)
+            )
+            print(
+                "Recomputed embeddings:"
+                f" mean {embedding_mean.shape}, cov {embedding_cov.shape},"
+                f" scores {bootstrap_scores.shape}"
             )
 
         shutil.copy(model_path, run_dir / "bootstrap_model.pt")
         if requires_bootstrap_embeddings:
-            shutil.copy(embed_path, run_dir / "bootstrap_embeddings.pt")
+            if recompute_embeddings:
+                torch.save(
+                    {
+                        "mean": embedding_mean,
+                        "cov": embedding_cov,
+                        "scores": bootstrap_scores,
+                    },
+                    run_dir / "bootstrap_embeddings.pt",
+                )
+            else:
+                shutil.copy(embed_path, run_dir / "bootstrap_embeddings.pt")
         (run_dir / "bootstrap_source.txt").write_text(str(bootstrap_source))
-        return model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, bootstrap_source
+        return model, embedding_mean, embedding_cov, bootstrap_scores, bootstrap_source
 
     print("\n" + "=" * 60)
     print("Phase 1: Bootstrap Training")
@@ -313,9 +375,21 @@ def _bootstrap_or_reuse(
     torch.save({"model_state_dict": model.state_dict()}, run_dir / "bootstrap_model.pt")
 
     if requires_bootstrap_embeddings:
+        # Collect embedding statistics from unaugmented images so the
+        # reference distribution is deterministic.
         print("\nCollecting embedding statistics...")
+        bootstrap_embed_dataset = DetectionDataset(
+            manifest_path=manifest_path,
+            split="train",
+            transform=train_transform,
+            augmentation=None,
+            frame_range=(0, config.bootstrap_frames),
+            min_box_area=config.min_box_area,
+            target_classes=config.target_classes,
+            verbose=False,
+        )
         embed_loader = torch.utils.data.DataLoader(
-            bootstrap_dataset,
+            bootstrap_embed_dataset,
             batch_size=config.bootstrap_batch_size,
             shuffle=False,
             num_workers=config.num_workers,
@@ -323,25 +397,23 @@ def _bootstrap_or_reuse(
             worker_init_fn=worker_init_fn,
             pin_memory=device.type == "cuda",
         )
-        embedding_mean, embedding_cov, embedding_count, bootstrap_scores = (
+        embedding_mean, embedding_cov, _embedding_count, bootstrap_scores = (
             collect_embeddings(model, embed_loader, device)
         )
         torch.save(
             {
                 "mean": embedding_mean,
                 "cov": embedding_cov,
-                "count": embedding_count,
                 "scores": bootstrap_scores,
             },
             run_dir / "bootstrap_embeddings.pt",
         )
         print(
             f"Embedding stats collected: mean {embedding_mean.shape}, "
-            f"cov {embedding_cov.shape}, n={embedding_count}, "
-            f"scores {bootstrap_scores.shape}"
+            f"cov {embedding_cov.shape}, scores {bootstrap_scores.shape}"
         )
 
-    return model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, None
+    return model, embedding_mean, embedding_cov, bootstrap_scores, None
 
 
 def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> None:
@@ -359,7 +431,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         print("AMP: enabled (mixed-precision training)")
 
     manifest_path = resolve_manifest_path(PROJECT_ROOT, config.manifest_path)
-    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path)
+    run_dir = setup_run_dir(PROJECT_ROOT, config.output_dir, config_path, seed=config.seed)
     print(f"Run directory: {run_dir}")
 
     class_mapping = build_class_mapping(config.target_classes)
@@ -376,7 +448,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         )
 
     bootstrap_start = time.time()
-    global_model, embedding_mean, embedding_cov, embedding_count, bootstrap_scores, bootstrap_source = _bootstrap_or_reuse(
+    global_model, embedding_mean, embedding_cov, bootstrap_scores, bootstrap_source = _bootstrap_or_reuse(
         config=config,
         run_dir=run_dir,
         manifest_path=manifest_path,
@@ -406,7 +478,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         manifest_path=manifest_path,
         split="train",
         transform=train_transform,
-        augmentation=train_augmentation,
+        augmentation=None,
         min_box_area=config.min_box_area,
         frame_range=(config.bootstrap_frames, None),
         target_classes=config.target_classes,
@@ -472,11 +544,11 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             config,
             bootstrap_mean=embedding_mean,
             bootstrap_cov=embedding_cov,
-            bootstrap_count=embedding_count,
             scoring_model=scoring_model,
             bootstrap_scores=_bs_list,
+            reservoir_seed_override=config.seed + 1000 * (cid + 1),
         )
-        for _ in range(config.num_clients)
+        for cid in range(config.num_clients)
     ]
 
     fed_logger = FederatedMetricsLogger(
@@ -485,6 +557,48 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         task="detection",
         class_names=class_mapping.names,
     )
+    decisions_logger = FederatedDecisionsLogger(log_dir=run_dir)
+
+    # Adaptive filter refresh setup (shared across clients).  One refresh
+    # applies the same scoring model + reference + threshold to every
+    # client's policy.  Disabled when scoring_refresh_every_rounds == 0.
+    adaptive_refresh_enabled = (
+        config.filter_policy == "distribution"
+        and config.scoring_refresh_every_rounds > 0
+    )
+    scoring_refresher: Optional[ScoringRefresher] = None
+    refresh_records: List[RefreshRecord] = []
+    fleet_reference_size: int = 0
+    pool_rng: Optional[random.Random] = None
+    if adaptive_refresh_enabled:
+        manifest = load_manifest(manifest_path)
+        all_train_entries = [f for f in manifest["frames"] if f["split"] == "train"]
+        bootstrap_entries = all_train_entries[: config.bootstrap_frames]
+        frame_id_to_entry = {f["frame_id"]: f for f in all_train_entries}
+        scoring_refresher = ScoringRefresher(
+            manifest_path=manifest_path,
+            bootstrap_frame_entries=bootstrap_entries,
+            frame_id_to_entry=frame_id_to_entry,
+            transform=train_transform,
+            target_classes=config.target_classes,
+            min_box_area=config.min_box_area,
+            batch_size=config.scoring_refresh_batch_size,
+            num_workers=config.num_workers,
+            device=device,
+            use_amp=config.use_amp,
+        )
+        fleet_reference_size = max(
+            config.scoring_refresh_window_size,
+            config.scoring_refresh_reservoir_size,
+        )
+        pool_rng = random.Random(config.seed + 7919)
+        print(
+            "Adaptive filter refresh enabled: every "
+            f"{config.scoring_refresh_every_rounds} round(s), "
+            f"window={config.scoring_refresh_window_size}, "
+            f"reservoir={config.scoring_refresh_reservoir_size}, "
+            f"fleet reference size={fleet_reference_size}"
+        )
 
     elapsed_seconds = lambda: (datetime.now() - start_time).total_seconds()
     global_state = global_model.state_dict()
@@ -534,7 +648,7 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 manifest_path=manifest_path,
                 split="train",
                 transform=train_transform,
-                augmentation=train_augmentation,
+                augmentation=None,
                 min_box_area=config.min_box_area,
                 frame_range=stream_slice,
                 target_classes=config.target_classes,
@@ -542,6 +656,30 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             )
 
             client_buffer = TrainingBuffer(capacity=config.buffer_capacity)
+
+            def _log_decision(
+                global_idx: int,
+                frame_id: str,
+                action: str,
+                filter_metric: str,
+                filter_score: float,
+                filter_threshold: Optional[float],
+                categories,
+                _round_idx: int = round_idx,
+                _cid: int = cid,
+            ) -> None:
+                decisions_logger.log_decision(
+                    round_idx=_round_idx,
+                    client_id=_cid,
+                    global_idx=global_idx,
+                    frame_id=frame_id,
+                    action=action,
+                    filter_metric=filter_metric,
+                    filter_score=filter_score,
+                    filter_threshold=filter_threshold,
+                    categories=categories,
+                )
+
             result = train_on_stream(
                 model=client_model,
                 stream=client_stream,
@@ -557,10 +695,10 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 shuffle_buffer_each_epoch=config.shuffle_buffer_each_epoch,
                 metrics_logger=None,
                 eval_fn=None,
-                novelty_tracker=None,
                 progress_bar=False,
                 total_items=len(client_stream),
                 scaler=scaler,
+                decision_callback=_log_decision,
             )
 
             accepted_items = int(result.items_accepted)
@@ -589,6 +727,32 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             global_model.load_state_dict(global_state)
         else:
             print("  WARNING: no client updates this round.")
+
+        if (
+            adaptive_refresh_enabled
+            and scoring_refresher is not None
+            and round_idx % config.scoring_refresh_every_rounds == 0
+        ):
+            dist_policies = [
+                p for p in client_policies if isinstance(p, DistributionBasedPolicy)
+            ]
+            pooled_window = pool_recent_accepted(
+                dist_policies, fleet_reference_size, rng=pool_rng,
+            )
+            record = scoring_refresher.refresh(
+                live_model=global_model,
+                policies=dist_policies,
+                accepted_frame_ids=pooled_window,
+                trigger="federated_round",
+                trigger_count=round_idx,
+            )
+            refresh_records.append(record)
+            print(
+                f"  [refresh #{record.refresh_idx}] window={record.window_size}, "
+                f"ref={record.reference_size}, "
+                f"thr: {record.threshold_before:.3f} -> {record.threshold_after:.3f}, "
+                f"{record.duration_seconds:.1f}s"
+            )
 
         eval_metrics = None
         if round_idx % max(config.eval_every_n_rounds, 1) == 0:
@@ -626,7 +790,25 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
     print("Federated training complete")
     print(f"  Final mAP:    {final_metrics.get('mAP', 0.0):.4f}")
     print(f"  Final mAP@50: {final_metrics.get('mAP_50', 0.0):.4f}")
+    if adaptive_refresh_enabled:
+        print(f"  Refreshes:    {len(refresh_records)}")
     print("=" * 60)
+
+    if adaptive_refresh_enabled and refresh_records:
+        refresh_csv = run_dir / "refreshes.csv"
+        with open(refresh_csv, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "refresh_idx", "trigger", "trigger_count", "items_seen",
+                    "window_size", "reference_size",
+                    "threshold_before", "threshold_after", "duration_seconds",
+                ],
+            )
+            writer.writeheader()
+            for r in refresh_records:
+                writer.writerow(r.__dict__)
+        print(f"Refresh log: {refresh_csv}")
 
     torch.save(
         {
@@ -676,6 +858,13 @@ if __name__ == "__main__":
         help="Reuse bootstrap model + embeddings from this run directory "
         "(overrides bootstrap_run_dir in config).",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override seed from config. Run artefacts are placed under "
+             "outputs/<exp>/seed_<N>/<timestamp>/ for multi-seed experiments.",
+    )
     args = parser.parse_args()
 
     config_path = PROJECT_ROOT / args.config
@@ -687,6 +876,8 @@ if __name__ == "__main__":
     config = FederatedDetectionConfig.from_yaml(config_path)
     if args.bootstrap_run_dir:
         config.bootstrap_run_dir = args.bootstrap_run_dir
+    if args.seed is not None:
+        config.seed = args.seed
 
     if config.num_clients < 1:
         raise ValueError("num_clients must be >= 1")
