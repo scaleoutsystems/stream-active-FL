@@ -12,9 +12,9 @@ Pipeline:
     bootstrap frames plus a fleet-wide sample of recent accepts.
 
 Usage:
-    python experiments/federated_detection.py \\
+    python experiments/federated.py \\
         --config configs/federated/fed_no_filter_cityday_road_type.yaml
-    python experiments/federated_detection.py \\
+    python experiments/federated.py \\
         --config configs/federated/fed_adaptive_cityday_road_type_p15.yaml \\
         --bootstrap-run-dir outputs/federated/fed_no_filter_cityday_road_type/seed_42/<timestamp>
 """
@@ -32,7 +32,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -52,14 +52,19 @@ from stream_active_fl.core import (
     partition_frames,
     partition_frames_by_domain,
 )
-from stream_active_fl.evaluation import evaluate_detection
-from stream_active_fl.experiment import (
+from stream_active_fl.evaluation import (
+    DEFAULT_DOMAIN_DIMS,
+    EXTENDED_DOMAIN_DIMS,
+    attach_stream_blocks,
+    evaluate_detection,
+)
+from stream_active_fl.runtime import (
     build_detector_from_config,
     load_dataclass_config,
     resolve_manifest_path,
     setup_run_dir,
 )
-from stream_active_fl.logging import (
+from stream_active_fl.tracking import (
     FederatedDecisionsLogger,
     FederatedMetricsLogger,
     log_gpu_memory,
@@ -151,6 +156,21 @@ class FederatedDetectionConfig:
     scoring_refresh_window_size: int = 0
     scoring_refresh_reservoir_size: int = 0
     scoring_refresh_batch_size: int = 16
+    # Reference distribution structure used by DistributionBasedPolicy.
+    # Mirrors the streaming knob (see experiments/streaming.py).
+    #   "single":         one Gaussian fitted to {bootstrap + accepted}
+    #                     (legacy behavior).
+    #   "two_reference":  two Gaussians, one on bootstrap and one on the
+    #                     fleet-pooled accepted set, with
+    #                     score = min(d_boot, d_adapt).  Requires either
+    #                     scoring_refresh_window_size > 0 or
+    #                     scoring_refresh_reservoir_size > 0.
+    scoring_reference_mode: Literal["single", "two_reference"] = "single"
+    # When False, the bootstrap is excluded from the reference at each
+    # refresh and only the fleet-pooled accepted window/reservoir is
+    # fitted (noBoot ablation).  Requires window > 0 or reservoir > 0;
+    # cannot be combined with scoring_reference_mode='two_reference'.
+    scoring_include_bootstrap: bool = True
 
     # Evaluation
     eval_every_n_rounds: int = 1
@@ -473,6 +493,24 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
         verbose=False,
     )
 
+    # Per-frame val domain metadata so server-side eval emits per-domain
+    # mAP keys (mAP_<dim>_<bucket>) every round.  Mirrors the streaming
+    # pipeline so the same analysis modules read either output layout.
+    val_domain_labels: Dict[str, Dict[str, Any]] = {
+        str(f["frame_id"]): {dim: f.get(dim) for dim in DEFAULT_DOMAIN_DIMS}
+        for f in val_stream.frames
+    }
+    manifest_for_blocks = load_manifest(manifest_path)
+    ordering_strategy = (
+        manifest_for_blocks.get("ordering", {}).get("strategy")
+        if isinstance(manifest_for_blocks.get("ordering"), dict)
+        else None
+    )
+    has_stream_block = attach_stream_blocks(
+        val_domain_labels, list(val_stream.frames), ordering_strategy,
+    )
+    eval_domain_dims = list(EXTENDED_DOMAIN_DIMS) if has_stream_block else list(DEFAULT_DOMAIN_DIMS)
+
     # Remaining train stream (after bootstrap) is partitioned across clients
     train_stream_for_len = DetectionStream(
         manifest_path=manifest_path,
@@ -571,6 +609,35 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
     fleet_reference_size: int = 0
     pool_rng: Optional[random.Random] = None
     if adaptive_refresh_enabled:
+        if (
+            config.scoring_reference_mode == "two_reference"
+            and config.scoring_refresh_window_size <= 0
+            and config.scoring_refresh_reservoir_size <= 0
+        ):
+            raise ValueError(
+                "scoring_reference_mode='two_reference' requires either "
+                "scoring_refresh_window_size > 0 or "
+                "scoring_refresh_reservoir_size > 0; without an accepted "
+                "reference there is no second Gaussian to fit."
+            )
+        if not config.scoring_include_bootstrap:
+            if (
+                config.scoring_refresh_window_size <= 0
+                and config.scoring_refresh_reservoir_size <= 0
+            ):
+                raise ValueError(
+                    "scoring_include_bootstrap=False requires either "
+                    "scoring_refresh_window_size > 0 or "
+                    "scoring_refresh_reservoir_size > 0; without an "
+                    "accepted reference there are no frames to fit at all."
+                )
+            if config.scoring_reference_mode == "two_reference":
+                raise ValueError(
+                    "scoring_include_bootstrap=False is incompatible with "
+                    "scoring_reference_mode='two_reference': there is only "
+                    "one set of frames (the fleet-pooled accepted "
+                    "window/reservoir) so a second Gaussian cannot be fitted."
+                )
         manifest = load_manifest(manifest_path)
         all_train_entries = [f for f in manifest["frames"] if f["split"] == "train"]
         bootstrap_entries = all_train_entries[: config.bootstrap_frames]
@@ -586,6 +653,8 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             num_workers=config.num_workers,
             device=device,
             use_amp=config.use_amp,
+            reference_mode=config.scoring_reference_mode,
+            include_bootstrap=config.scoring_include_bootstrap,
         )
         fleet_reference_size = max(
             config.scoring_refresh_window_size,
@@ -597,6 +666,8 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             f"{config.scoring_refresh_every_rounds} round(s), "
             f"window={config.scoring_refresh_window_size}, "
             f"reservoir={config.scoring_refresh_reservoir_size}, "
+            f"reference_mode={config.scoring_reference_mode}, "
+            f"include_bootstrap={config.scoring_include_bootstrap}, "
             f"fleet reference size={fleet_reference_size}"
         )
 
@@ -762,6 +833,8 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
                 device,
                 score_threshold=config.score_threshold,
                 use_amp=config.use_amp,
+                domain_labels=val_domain_labels,
+                domain_dims=eval_domain_dims,
             )
             final_metrics = eval_metrics
             print(
@@ -784,6 +857,8 @@ def main(config: FederatedDetectionConfig, config_path: Path, command: str) -> N
             device,
             score_threshold=config.score_threshold,
             use_amp=config.use_amp,
+            domain_labels=val_domain_labels,
+            domain_dims=eval_domain_dims,
         )
 
     print("\n" + "=" * 60)

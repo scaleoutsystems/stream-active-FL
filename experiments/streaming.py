@@ -17,9 +17,9 @@ embeddings, and/or uncertainty scores from a previous run.  This saves
 hours when comparing filter policies on the same bootstrap.
 
 Usage:
-    python experiments/streaming_detection.py \\
+    python experiments/streaming.py \\
         --config configs/streaming/no_filter_cityday_curated.yaml
-    python experiments/streaming_detection.py \\
+    python experiments/streaming.py \\
         --config configs/streaming/adaptive_reservoir_p15_cityday_curated.yaml \\
         --bootstrap-run-dir outputs/streaming/no_filter_cityday_curated/seed_42/<timestamp>
 """
@@ -61,13 +61,13 @@ from stream_active_fl.evaluation import (
     attach_stream_blocks,
     evaluate_detection,
 )
-from stream_active_fl.experiment import (
+from stream_active_fl.runtime import (
     build_detector_from_config,
     load_dataclass_config,
     resolve_manifest_path,
     setup_run_dir,
 )
-from stream_active_fl.logging import StreamingMetricsLogger, log_gpu_memory, save_run_info
+from stream_active_fl.tracking import StreamingMetricsLogger, log_gpu_memory, save_run_info
 from stream_active_fl.memory import TrainingBuffer
 from stream_active_fl.policies import (
     DetectionUncertaintyPolicy,
@@ -188,6 +188,21 @@ class StreamingDetectionConfig:
     scoring_refresh_window_size: int = 0
     scoring_refresh_reservoir_size: int = 0
     scoring_refresh_batch_size: int = 16
+    # Reference distribution structure used by DistributionBasedPolicy:
+    #   "single":         one Gaussian fitted to {bootstrap + accepted}
+    #                     (legacy behavior).
+    #   "two_reference":  two Gaussians, one on bootstrap and one on
+    #                     accepted, with score = min(d_boot, d_adapt).
+    #                     Avoids the unimodal-fit pathology when the
+    #                     accepted set drifts away from the bootstrap.
+    #                     Requires window_size > 0 or reservoir_size > 0.
+    scoring_reference_mode: Literal["single", "two_reference"] = "single"
+    # When False, the bootstrap is excluded from the reference at each
+    # refresh and only the accepted window/reservoir is fitted (noBoot
+    # ablation).  Default True preserves the legacy bootstrap-anchored
+    # behavior.  Requires window > 0 or reservoir > 0; cannot combine
+    # with scoring_reference_mode='two_reference'.
+    scoring_include_bootstrap: bool = True
 
     # Evaluation
     eval_every_n_items: int = 5000
@@ -710,6 +725,49 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
     on_refresh_cb: Optional[Callable[[int, int], None]] = None
     if adaptive_refresh_enabled:
         assert refreshable_policy is not None
+        if (
+            config.scoring_reference_mode == "two_reference"
+            and config.scoring_refresh_window_size <= 0
+            and config.scoring_refresh_reservoir_size <= 0
+        ):
+            raise ValueError(
+                "scoring_reference_mode='two_reference' requires either "
+                "scoring_refresh_window_size > 0 or "
+                "scoring_refresh_reservoir_size > 0; without an accepted "
+                "reference there is no second Gaussian to fit."
+            )
+        if (
+            config.scoring_reference_mode == "two_reference"
+            and not isinstance(refreshable_policy, DistributionBasedPolicy)
+        ):
+            raise ValueError(
+                "scoring_reference_mode='two_reference' is only supported "
+                "for DistributionBasedPolicy (filter_policy='distribution' "
+                "or 'mixed_distribution')."
+            )
+        if not config.scoring_include_bootstrap:
+            if (
+                config.scoring_refresh_window_size <= 0
+                and config.scoring_refresh_reservoir_size <= 0
+            ):
+                raise ValueError(
+                    "scoring_include_bootstrap=False requires either "
+                    "scoring_refresh_window_size > 0 or "
+                    "scoring_refresh_reservoir_size > 0; without an "
+                    "accepted reference there are no frames to fit at all."
+                )
+            if config.scoring_reference_mode == "two_reference":
+                raise ValueError(
+                    "scoring_include_bootstrap=False is incompatible with "
+                    "scoring_reference_mode='two_reference': there is only "
+                    "one set of frames (the accepted window/reservoir) so a "
+                    "second Gaussian cannot be fitted."
+                )
+            if not isinstance(refreshable_policy, DistributionBasedPolicy):
+                raise ValueError(
+                    "scoring_include_bootstrap=False is only supported for "
+                    "DistributionBasedPolicy."
+                )
         manifest = load_manifest(manifest_path)
         all_train_entries = [f for f in manifest["frames"] if f["split"] == "train"]
         bootstrap_entries = all_train_entries[: config.bootstrap_frames]
@@ -725,12 +783,16 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             num_workers=config.num_workers,
             device=device,
             use_amp=config.use_amp,
+            reference_mode=config.scoring_reference_mode,
+            include_bootstrap=config.scoring_include_bootstrap,
         )
         print(
             "Adaptive filter refresh enabled: every "
             f"{config.scoring_refresh_every_flushes} buffer flushes, "
             f"window={config.scoring_refresh_window_size}, "
-            f"reservoir={config.scoring_refresh_reservoir_size}"
+            f"reservoir={config.scoring_refresh_reservoir_size}, "
+            f"reference_mode={config.scoring_reference_mode}, "
+            f"include_bootstrap={config.scoring_include_bootstrap}"
         )
 
         def _refresh_cb(items_processed: int, buffer_flushes: int) -> None:
@@ -801,7 +863,6 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
             domain_dims=eval_domain_dims,
         )
 
-    # Save run info
     dataset_info = {
         "bootstrap_frames": config.bootstrap_frames,
         "stream_frames": len(train_stream),
@@ -908,7 +969,6 @@ def main(config: StreamingDetectionConfig, config_path: Path, command: str) -> N
         run_dir / "final_model.pt",
     )
 
-    # Save final run info
     save_run_info(
         run_dir=run_dir,
         config=config,

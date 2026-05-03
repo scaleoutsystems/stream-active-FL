@@ -73,3 +73,65 @@ def test_stats_tracking():
     assert stats["total_flushes"] == 1
     assert stats["current_size"] == 1
     assert stats["capacity"] == 2
+
+
+# ---------------------------------------------------------------------------
+# get_minibatches
+# ---------------------------------------------------------------------------
+
+
+def test_get_minibatches_empty_buffer():
+    buf = TrainingBuffer(capacity=4)
+    assert buf.get_minibatches(mini_batch_size=2) == []
+
+
+def test_get_minibatches_evenly_splits():
+    buf = TrainingBuffer(capacity=6)
+    for i in range(6):
+        buf.add(_make_item(frame_id=f"f{i}"))
+
+    batches = buf.get_minibatches(mini_batch_size=2)
+    assert len(batches) == 3
+    for images, targets in batches:
+        assert len(images) == 2
+        assert len(targets) == 2
+
+
+def test_get_minibatches_handles_remainder():
+    """A trailing partial mini-batch is emitted, not dropped."""
+    buf = TrainingBuffer(capacity=5)
+    for i in range(5):
+        buf.add(_make_item(frame_id=f"f{i}"))
+
+    batches = buf.get_minibatches(mini_batch_size=2)
+    assert len(batches) == 3
+    assert len(batches[-1][0]) == 1
+
+
+def test_get_minibatches_invalid_size():
+    import pytest
+    buf = TrainingBuffer(capacity=2)
+    buf.add(_make_item())
+    with pytest.raises(ValueError, match="must be > 0"):
+        buf.get_minibatches(mini_batch_size=0)
+
+
+def test_get_minibatches_shuffle_does_not_mutate_buffer():
+    """get_minibatches works on a copy; the underlying buffer is untouched."""
+    buf = TrainingBuffer(capacity=4)
+    for i in range(4):
+        buf.add(_make_item(frame_id=f"f{i}"))
+
+    pre_ids = [it.metadata["frame_id"] for it in buf._items]
+    buf.get_minibatches(mini_batch_size=2, shuffle=True)
+    post_ids = [it.metadata["frame_id"] for it in buf._items]
+    assert pre_ids == post_ids
+
+
+def test_get_minibatches_does_not_increment_flushes():
+    """Only clear() should bump total_flushes; mini-batch retrieval is read-only."""
+    buf = TrainingBuffer(capacity=4)
+    for _ in range(4):
+        buf.add(_make_item())
+    buf.get_minibatches(mini_batch_size=2)
+    assert buf.total_flushes == 0

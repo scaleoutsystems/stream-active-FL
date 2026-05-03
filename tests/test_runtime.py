@@ -1,4 +1,4 @@
-"""Tests for stream_active_fl.experiment (config loading, run setup)."""
+"""Tests for stream_active_fl.runtime (config loading, run setup)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from stream_active_fl.experiment import (
+from stream_active_fl.runtime import (
     create_run_dir,
     load_dataclass_config,
     resolve_manifest_path,
@@ -73,7 +73,10 @@ def test_load_dataclass_config_rejects_non_dataclass():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_manifest_path_relative(tmp_path: Path):
+def test_resolve_manifest_path_relative(tmp_path: Path, monkeypatch):
+    # Clear the data-root override so we exercise the project-root branch
+    # regardless of the runtime environment (CI, HPC SLURM, etc.).
+    monkeypatch.delenv("STREAM_ACTIVE_FL_DATA_ROOT", raising=False)
     result = resolve_manifest_path(tmp_path, "data/manifest.json")
     assert result == tmp_path / "data/manifest.json"
 
@@ -82,6 +85,26 @@ def test_resolve_manifest_path_absolute(tmp_path: Path):
     abs_path = Path("/absolute/manifest.json")
     result = resolve_manifest_path(tmp_path, abs_path)
     assert result == abs_path
+
+
+def test_resolve_manifest_path_data_root_override(tmp_path: Path, monkeypatch):
+    """When STREAM_ACTIVE_FL_DATA_ROOT is set, data/* paths rebase onto it."""
+    data_root = tmp_path / "shared_data"
+    data_root.mkdir()
+    monkeypatch.setenv("STREAM_ACTIVE_FL_DATA_ROOT", str(data_root))
+    result = resolve_manifest_path(tmp_path, "data/manifest.json")
+    assert result == data_root / "manifest.json"
+
+
+def test_resolve_manifest_path_existing_relative_wins_over_data_root(
+    tmp_path: Path, monkeypatch,
+):
+    """If the path resolves under project_root, that wins over the env override."""
+    monkeypatch.setenv("STREAM_ACTIVE_FL_DATA_ROOT", "/non/existent/data/root")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "manifest.json").write_text("{}")
+    result = resolve_manifest_path(tmp_path, "data/manifest.json")
+    assert result == tmp_path / "data" / "manifest.json"
 
 
 # ---------------------------------------------------------------------------

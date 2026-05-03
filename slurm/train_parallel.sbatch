@@ -13,17 +13,17 @@
 # Run up to 4 experiments in parallel, one per GPU.
 #
 # Arguments are <type> <config> pairs:
-#   sbatch slurm/run_parallel.sbatch \
+#   sbatch slurm/train_parallel.sbatch \
 #     streaming configs/streaming/adaptive_cityday_road_type_p10.yaml \
 #     streaming configs/streaming/adaptive_citymix_road_type_p10.yaml \
 #     streaming configs/streaming/adaptive_citymix_conditions_p10.yaml
 #
 # Optional SEED override (applied to every experiment):
-#   sbatch --export=ALL,SEED=43 slurm/run_parallel.sbatch streaming <cfg1> streaming <cfg2>
+#   sbatch --export=ALL,SEED=43 slurm/train_parallel.sbatch streaming <cfg1> streaming <cfg2>
 #
 # Optional BOOTSTRAP_RUN_DIR override (applied to every experiment):
 #   sbatch --export=ALL,BOOTSTRAP_RUN_DIR=outputs/streaming/no_filter_cityday_road_type/<run_id> \
-#     slurm/run_parallel.sbatch streaming <cfg1> streaming <cfg2>
+#     slurm/train_parallel.sbatch streaming <cfg1> streaming <cfg2>
 #
 # Supported types: streaming, federated
 
@@ -56,7 +56,7 @@ ARGS=("$@")
 NUM_ARGS=${#ARGS[@]}
 
 if [[ $NUM_ARGS -eq 0 || $((NUM_ARGS % 2)) -ne 0 ]]; then
-  echo "Usage: sbatch slurm/run_parallel.sbatch <type> <config> [<type> <config> ...]"
+  echo "Usage: sbatch slurm/train_parallel.sbatch <type> <config> [<type> <config> ...]"
   echo "  type: streaming | federated"
   echo "  Max 4 experiments (one per GPU)."
   exit 1
@@ -82,8 +82,8 @@ for i in $(seq 0 $((NUM_EXPERIMENTS - 1))); do
   CONFIG="${ARGS[$((i * 2 + 1))]}"
 
   case "$TYPE" in
-    streaming) SCRIPT="experiments/streaming_detection.py" ;;
-    federated) SCRIPT="experiments/federated_detection.py" ;;
+    streaming) SCRIPT="experiments/streaming.py" ;;
+    federated) SCRIPT="experiments/federated.py" ;;
     *) echo "ERROR: unknown type '$TYPE' (use streaming or federated)"; exit 1 ;;
   esac
 

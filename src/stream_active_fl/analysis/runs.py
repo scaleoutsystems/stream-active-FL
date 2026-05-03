@@ -1,8 +1,9 @@
-"""Shared helpers for experiment-analysis notebooks.
+"""
+Generic primitives for analyzing experiment outputs.
 
 Provides run discovery, CSV loading, manifest parsing, optional ZOD
-metadata enrichment, and forgetting / summary utilities.  Keeps notebook
-cells thin so the analysis logic is testable and reusable.
+metadata enrichment, and forgetting / summary utilities.  The
+streaming-specific and federated-specific submodules build on top.
 
 Expected output layout (created by the experiment scripts):
 
@@ -352,8 +353,8 @@ def filter_mode(cfg: Dict[str, Any]) -> str:
     return "window"
 
 
-#: Stable color for each filter family (used across notebooks and the
-#: standalone analysis script analyze_runs.py).
+# Stable color for each filter family (used across notebooks and the
+# package-level CLI: `python -m stream_active_fl.analysis`).
 FILTER_FAMILY_COLORS: Dict[str, str] = {
     "none": "#2ca02c",         # green  -- accept-everything upper bound
     "random": "#7f7f7f",       # grey   -- compute-matched null model
@@ -1005,6 +1006,54 @@ def compute_step_series(df: Optional[pd.DataFrame]) -> Optional[pd.Series]:
     return None
 
 
+def smoothed_tail_mAP(
+    df: Optional[pd.DataFrame],
+    k: int = 5,
+    mAP_col: str = "mAP",
+) -> Optional[float]:
+    """Mean of the last 'k' mAP values in a checkpoint log.
+
+    Streaming evaluation is noisy at the small COCO sample sizes used for
+    periodic checkpoints (~10k val frames), and a single-checkpoint
+    'last_mAP' can swing by +/-0.005.  Averaging the tail flattens this
+    noise and gives a more stable end-of-stream estimate suitable for
+    leaderboards.
+
+    Returns 'None' when 'df' is empty / missing the column or no usable
+    values are present.  The window is capped at the number of available
+    rows, so 'k' larger than the trajectory length is silently shrunk.
+    """
+    if df is None or df.empty or mAP_col not in df.columns:
+        return None
+    tail = pd.to_numeric(df[mAP_col].tail(int(max(1, k))), errors="coerce").dropna()
+    if tail.empty:
+        return None
+    return float(tail.mean())
+
+
+def actual_accept_rate(run_dir: Path) -> Optional[float]:
+    """Mean accept fraction reported by 'filter_stats.csv'.
+
+    Each filter-stats row is one flush window; 'accept_rate' there is the
+    fraction of frames decided in that window that were accepted.  This
+    is the *true* streaming accept rate -- the same as 'n_accepts /
+    n_decisions' on 'decisions.csv', but available even when the run
+    dropped 'decisions.csv' for size.
+
+    Returns 'None' when 'filter_stats.csv' is absent or has no
+    'accept_rate' column.
+    """
+    p = run_dir / "filter_stats.csv"
+    if not p.exists():
+        return None
+    df = pd.read_csv(p)
+    for col in ("accept_rate", "accepted_rate", "accepts_per_check"):
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce").dropna()
+            return float(vals.mean()) if not vals.empty else None
+    return None
+
+
 def iso_compute_mAP(
     ck: Optional[pd.DataFrame],
     target_optim_steps: Optional[int] = None,
@@ -1053,6 +1102,7 @@ def variant_summary_table(
     variants: Optional[Sequence[str]] = None,
     *,
     target_optim_steps: Union[int, Mapping[str, int], None] = None,
+    tail_k: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build a one-row-per-(variant, seed) summary for a pipeline.
 
@@ -1088,6 +1138,10 @@ def variant_summary_table(
             # rounds.csv as the mAP source.
             ck_for_map = ck if (ck is not None and not ck.empty) else rnd
             map_stats = iso_compute_mAP(ck_for_map, target_optim_steps=iso_steps)
+            if tail_k is not None and tail_k > 0:
+                map_stats["smoothed_mAP"] = smoothed_tail_mAP(ck_for_map, k=tail_k)
+            else:
+                map_stats["smoothed_mAP"] = None
             if dec is not None and not dec.empty:
                 n_dec = int(len(dec))
                 n_acc = int((dec["action"] == "accept").sum())
@@ -1119,7 +1173,10 @@ def variant_summary_table(
                 "best_mAP": map_stats["best_mAP"],
                 "last_mAP": map_stats["last_mAP"],
                 "iso_mAP": map_stats["iso_mAP"],
+                "smoothed_mAP": map_stats["smoothed_mAP"],
+                "smoothed_tail_k": tail_k,
                 "iso_target_steps": iso_steps,
+                "actual_accept_rate": actual_accept_rate(rdir),
                 "duration_h": (
                     round(float(duration_s) / 3600.0, 2)
                     if isinstance(duration_s, (int, float)) else None
@@ -1133,7 +1190,9 @@ def aggregate_summary_across_seeds(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse a variant_summary_table result to mean/std per variant."""
     if df.empty:
         return df
-    metric_cols = [c for c in ("accept_rate", "best_mAP", "last_mAP", "iso_mAP")
+    metric_cols = [c for c in ("accept_rate", "actual_accept_rate",
+                                "best_mAP", "last_mAP", "iso_mAP",
+                                "smoothed_mAP")
                    if c in df.columns]
     group_cols = ["variant", "manifest", "filter_family",
                   "threshold_percentile", "refresh_window_size",
@@ -1174,6 +1233,191 @@ def load_per_domain_checkpoints(run_dir: Path) -> Optional[pd.DataFrame]:
     mAP, mAP_50, mAP_75, AP_<class>...
     """
     return read_csv(run_dir / "per_domain_checkpoints.csv")
+
+
+def aggregate_per_domain_checkpoints(
+    run_dirs_by_seed: Mapping[int, Path],
+    *,
+    target_optim_steps: Optional[int] = None,
+    tail_k: Optional[int] = None,
+) -> pd.DataFrame:
+    """Aggregate live 'per_domain_checkpoints.csv' across seeds.
+
+    Picks one row per (seed, dimension, bucket) and averages over seeds.
+    Three modes for the per-seed pick:
+
+    1. 'target_optim_steps' is given:
+       Take the latest row whose 'optimizer_steps <= target'.
+       Useful for iso-compute per-domain comparisons (e.g. report all
+       variants at the same step budget so accept-rate differences do
+       not confound the comparison).
+    2. 'tail_k' is given:
+       Average over the last 'k' eval rows for that (dim, bucket) inside
+       the seed.  Reduces eval noise; reports end-of-stream behavior.
+    3. Neither:
+       Take the latest row.  Equivalent to 'tail_k=1'.
+
+    Returns columns 'dimension, bucket, n_frames, mAP_mean, mAP_std,
+    mAP_n, optim_steps_mean'.  Empty DataFrame when no rows are found.
+    """
+    parts: List[pd.DataFrame] = []
+    for seed, rdir in run_dirs_by_seed.items():
+        df = load_per_domain_checkpoints(rdir)
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df["seed"] = int(seed)
+        if target_optim_steps is not None and "optimizer_steps" in df.columns:
+            df = df.loc[
+                pd.to_numeric(df["optimizer_steps"], errors="coerce")
+                  .le(int(target_optim_steps))
+            ].copy()
+            if df.empty:
+                continue
+            picked = (df.sort_values("optimizer_steps")
+                        .groupby(["dimension", "bucket"], as_index=False)
+                        .tail(1))
+            parts.append(picked)
+        elif tail_k is not None and tail_k > 0:
+            picked = (df.sort_values("optimizer_steps")
+                        .groupby(["dimension", "bucket"], as_index=False)
+                        .tail(int(tail_k))
+                        .groupby(["dimension", "bucket"], as_index=False)
+                        .agg(mAP=("mAP", "mean"),
+                             n_frames=("n_frames", "max"),
+                             optimizer_steps=("optimizer_steps", "mean")))
+            picked["seed"] = int(seed)
+            parts.append(picked)
+        else:
+            picked = (df.sort_values("optimizer_steps")
+                        .groupby(["dimension", "bucket"], as_index=False)
+                        .tail(1))
+            parts.append(picked)
+    if not parts:
+        return pd.DataFrame(
+            columns=["dimension", "bucket", "n_frames", "mAP_mean",
+                     "mAP_std", "mAP_n", "optim_steps_mean"]
+        )
+    long = pd.concat(parts, ignore_index=True)
+    grp = long.groupby(["dimension", "bucket"])["mAP"]
+    out = pd.DataFrame({
+        "mAP_mean": grp.mean(),
+        "mAP_std": grp.std(ddof=0),
+        "mAP_n": grp.count(),
+    }).reset_index()
+    n_frames = (long.groupby(["dimension", "bucket"])["n_frames"].max()
+                    .reset_index().rename(columns={"n_frames": "n_frames"}))
+    steps_col = "optimizer_steps"
+    if steps_col in long.columns:
+        steps = (long.groupby(["dimension", "bucket"])[steps_col].mean()
+                     .reset_index()
+                     .rename(columns={steps_col: "optim_steps_mean"}))
+        out = out.merge(steps, on=["dimension", "bucket"], how="left")
+    out = out.merge(n_frames, on=["dimension", "bucket"], how="left")
+    return out
+
+
+def per_domain_checkpoints_table(
+    runs_df: pd.DataFrame,
+    pipeline: str,
+    variants: Sequence[str],
+    *,
+    target_optim_steps: Optional[int] = None,
+    tail_k: Optional[int] = None,
+) -> pd.DataFrame:
+    """Per-domain leaderboard across variants from live checkpoint logs.
+
+    For each variant in 'variants', aggregate 'per_domain_checkpoints.csv'
+    across its seeds (see 'aggregate_per_domain_checkpoints' for the
+    'target_optim_steps' / 'tail_k' modes), then concatenate with a
+    'run_variant' column so the result is a long-format table suitable
+    for downstream merges with 'per_domain_gain_vs_baseline' and
+    'balanced_map_table'.
+    """
+    parts: List[pd.DataFrame] = []
+    for v in variants:
+        seed_dirs = pick_runs_by_seed(runs_df, pipeline, v, seeds=None)
+        if not seed_dirs:
+            continue
+        df = aggregate_per_domain_checkpoints(
+            seed_dirs,
+            target_optim_steps=target_optim_steps,
+            tail_k=tail_k,
+        )
+        if df.empty:
+            continue
+        df = df.copy()
+        df.insert(0, "run_variant", v)
+        parts.append(df)
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def iso_accept_pairs(
+    summary_df: pd.DataFrame,
+    *,
+    accept_col: str = "accept_rate",
+    family_col: str = "filter_family",
+    tolerance: float = 0.03,
+    reference_family: str = "random",
+) -> pd.DataFrame:
+    """Match each filter run to the reference run with the closest accept rate.
+
+    Use this to build "iso-accept" comparisons: for every non-reference
+    variant, the row reports the variant's accept rate, the reference
+    variant whose mean accept rate is closest, and the absolute accept-
+    rate gap.  Variants without a reference match within 'tolerance'
+    (e.g. filters that accept 33% with no random_p33 baseline available)
+    get 'matched_variant=None' so callers can flag them as
+    "no fair comparison".
+
+    The intended caller is something like:
+
+        smry = ah.aggregate_summary_across_seeds(
+            ah.variant_summary_table(runs_df, "streaming", variants))
+        pairs = ah.iso_accept_pairs(smry)
+
+    Returns columns
+    'variant, filter_family, accept_rate, matched_variant,
+    matched_accept_rate, gap'.
+    """
+    if summary_df.empty:
+        return pd.DataFrame()
+    accept_col_eff = accept_col if accept_col in summary_df.columns else f"{accept_col}_mean"
+    if accept_col_eff not in summary_df.columns or family_col not in summary_df.columns:
+        return pd.DataFrame()
+    refs = summary_df.loc[summary_df[family_col] == reference_family,
+                          ["variant", accept_col_eff]].copy()
+    refs = refs.rename(columns={accept_col_eff: "ref_accept"})
+    rows: List[Dict[str, Any]] = []
+    for _, r in summary_df.iterrows():
+        if r[family_col] == reference_family:
+            continue
+        a = float(r[accept_col_eff])
+        if refs.empty or pd.isna(a):
+            rows.append({
+                "variant": r["variant"],
+                "filter_family": r[family_col],
+                "accept_rate": a,
+                "matched_variant": None,
+                "matched_accept_rate": None,
+                "gap": None,
+            })
+            continue
+        gaps = (refs["ref_accept"] - a).abs()
+        i = int(gaps.idxmin())
+        gap = float(gaps.loc[i])
+        rows.append({
+            "variant": r["variant"],
+            "filter_family": r[family_col],
+            "accept_rate": a,
+            "matched_variant": refs.loc[i, "variant"] if gap <= tolerance else None,
+            "matched_accept_rate": float(refs.loc[i, "ref_accept"])
+                                    if gap <= tolerance else None,
+            "gap": gap,
+        })
+    return pd.DataFrame(rows)
 
 
 def collect_per_domain_eval(run_dirs: Iterable[Path]) -> pd.DataFrame:
@@ -1284,7 +1528,7 @@ def balanced_map_table(
 # Shared visualization constants
 # =============================================================================
 
-#: Canonical colors for road_type blocks.  Used by notebooks 00 and 02.
+# Canonical colors for road_type blocks.  Used by notebooks 00 and 02.
 DOMAIN_COLORS: Dict[str, str] = {
     "city": "#1f77b4",
     "arterial-urban": "#ff7f0e",
@@ -1293,7 +1537,7 @@ DOMAIN_COLORS: Dict[str, str] = {
     "smaller-rural": "#9467bd",
 }
 
-#: Canonical colors for time_of_day values.
+# Canonical colors for time_of_day values.
 TOD_COLORS: Dict[str, str] = {
     "day": "#FFD700",
     "twilight": "#FF8C00",
@@ -1301,7 +1545,7 @@ TOD_COLORS: Dict[str, str] = {
     "night": "#191970",
 }
 
-#: Canonical colors for weather / conditions blocks.
+# Canonical colors for weather / conditions blocks.
 WEATHER_COLORS: Dict[str, str] = {
     "clear": "#FDDA0D",
     "cloudy": "#A9A9A9",
@@ -1315,7 +1559,7 @@ WEATHER_COLORS: Dict[str, str] = {
     "unknown": "#CCCCCC",
 }
 
-#: Short display names for road_type categories.
+# Short display names for road_type categories.
 ROAD_SHORT: Dict[str, str] = {
     "city": "City",
     "arterial-urban": "Art.-Urban",
@@ -1324,7 +1568,7 @@ ROAD_SHORT: Dict[str, str] = {
     "smaller-rural": "Sm.-Rural",
 }
 
-#: Short display names for weather categories.
+# Short display names for weather categories.
 WEATHER_SHORT: Dict[str, str] = {
     "clear": "Clear",
     "cloudy": "Cloudy",
@@ -1333,7 +1577,7 @@ WEATHER_SHORT: Dict[str, str] = {
     "snow": "Snow",
 }
 
-#: Short display names for time_of_day categories.
+# Short display names for time_of_day categories.
 TOD_SHORT: Dict[str, str] = {
     "day": "Day",
     "twilight": "Twilight",

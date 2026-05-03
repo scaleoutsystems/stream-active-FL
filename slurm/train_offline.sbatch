@@ -26,5 +26,5 @@ export STREAM_ACTIVE_FL_PREPROCESSED_ROOT=/project/home/p201222/data/ZOD_frames_
 mkdir -p "$STREAM_ACTIVE_FL_PREPROCESSED_ROOT/logs"
 python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__version__}  cuda={torch.cuda.is_available()}')"
 
-python experiments/offline_baseline.py \
-  --config configs/offline_baseline.yaml
+python experiments/offline.py \
+  --config configs/offline/baseline.yaml

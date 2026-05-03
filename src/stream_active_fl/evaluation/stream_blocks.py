@@ -68,8 +68,14 @@ def cityday_curated_block_label(meta: Mapping[str, Any]) -> str:
 
 # Registry of strategy name -> per-frame labeler.  Extend here when new
 # manifest ordering strategies are added.
+#
+# cityday_temporal_blocks reuses the cityday_curated labeler so per-domain
+# val mAP is reported on the same 13 buckets, regardless of whether the
+# stream is curated-block-ordered or temporally ordered.  This makes
+# per-domain comparisons across the two orderings directly meaningful.
 _STRATEGY_TO_LABELER = {
     "cityday_curated_blocks": cityday_curated_block_label,
+    "cityday_temporal_blocks": cityday_curated_block_label,
 }
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from ..core import CATEGORY_ID_TO_NAME
-from ..evaluation.detection import DEFAULT_DOMAIN_DIMS
+from ..evaluation import EXTENDED_DOMAIN_DIMS
 
 _DEFAULT_CLASS_NAMES: List[str] = list(CATEGORY_ID_TO_NAME.values())
 _CHECKPOINT_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
@@ -32,9 +32,11 @@ class StreamingMetricsLogger:
     CSV files written:
     - streaming_metrics.csv: Main metrics at each checkpoint
     - checkpoints.csv: Aggregate evaluation metrics at checkpoint intervals
-    - per_domain_checkpoints.csv: Per-domain (time_of_day / road_condition /
-      road_type) mAP in long format, one row per (checkpoint, dimension,
-      bucket).  Only written if eval_metrics contains per-domain keys.
+    - per_domain_checkpoints.csv: Per-domain mAP in long format, one row
+      per (checkpoint, dimension, bucket).  Covers the marginal axes
+      (time_of_day, road_condition, road_type) and the joint stream_block
+      label when the manifest ordering strategy is recognized.  Only
+      written if eval_metrics contains per-domain keys.
     - filter_stats.csv: Per-category filter selection statistics
     - decisions.csv: Per-frame accept/reject log
 
@@ -259,10 +261,17 @@ class StreamingMetricsLogger:
         eval_metrics: Dict[str, float],
     ) -> None:
         """Emit long-format per-(dim, bucket) rows when present in metrics."""
-        # Match keys mAP_<dim>_<bucket> against known domain dimensions
-        # (dim names may contain underscores like time_of_day).
+        # Match keys mAP_<dim>_<bucket> against known domain dimensions.
+        # Dim names can contain underscores (time_of_day, stream_block);
+        # we match longest prefix first so e.g. mAP_road_type_city is
+        # parsed as dim=road_type + bucket=city rather than dim=road +
+        # bucket=type_city.
         bucket_keys: List[tuple] = []
-        dim_prefixes = [(f"mAP_{d}_", d) for d in DEFAULT_DOMAIN_DIMS]
+        dim_prefixes = sorted(
+            [(f"mAP_{d}_", d) for d in EXTENDED_DOMAIN_DIMS],
+            key=lambda p: len(p[0]),
+            reverse=True,
+        )
         for key in eval_metrics:
             for prefix, dim in dim_prefixes:
                 if key.startswith(prefix):

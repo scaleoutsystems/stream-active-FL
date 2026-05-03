@@ -6,8 +6,8 @@ Trains a detection model on all training frames for multiple epochs using a
 standard DataLoader with shuffle, then evaluates on the validation set.
 
 Supports single-GPU and multi-GPU (DDP) training:
-    python experiments/offline_baseline.py --config configs/offline_baseline.yaml
-    torchrun --nproc_per_node=4 experiments/offline_baseline.py --config configs/offline_baseline.yaml
+    python experiments/offline.py --config configs/offline/baseline.yaml
+    torchrun --nproc_per_node=4 experiments/offline.py --config configs/offline/baseline.yaml
 """
 
 from __future__ import annotations
@@ -42,13 +42,13 @@ from stream_active_fl.core import (
     get_detection_transforms,
 )
 from stream_active_fl.evaluation import evaluate_detection
-from stream_active_fl.experiment import (
+from stream_active_fl.runtime import (
     build_detector_from_config,
     load_dataclass_config,
     resolve_manifest_path,
     setup_run_dir,
 )
-from stream_active_fl.logging import log_gpu_memory, save_run_info
+from stream_active_fl.tracking import log_gpu_memory, save_run_info
 from stream_active_fl.training import bootstrap_train
 from stream_active_fl.utils import set_seed, worker_init_fn
 

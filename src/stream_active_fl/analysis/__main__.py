@@ -1,39 +1,49 @@
-"""Produce summary tables for streaming / federated runs.
+"""
+Command-line driver for the analysis package.
 
 Regenerates the tables that live in the streaming and federated
 notebooks (per-seed summary, cross-seed aggregate, per-block accept
-rate, inter-refresh accept rate) without opening a notebook.  Useful
-for CI, reports, and quick sanity checks after a new batch of runs.
+rate, inter-refresh accept rate) plus the consolidated summary tables
+(inventory, iso-accept, per-domain grids, ablation pairings) without
+opening a notebook.  Useful for CI, reports, and quick sanity checks
+after a new batch of runs.
 
 Usage:
 
-    python notebooks/analyze_runs.py \\
-        --outputs outputs \\
-        --pipeline streaming \\
-        [--csv-dir reports/runs] \\
-        [--variants no_filter_cityday_curated static_p15_cityday_curated ...]
+    # Run-level tables (per-seed summary etc.) for both pipelines:
+    python -m stream_active_fl.analysis --csv-dir reports
 
-Without --csv-dir the tables are only printed; with it they are also
-written as CSVs under that directory.  With --pipeline federated the
-script analyzes the federated outputs; --pipeline both runs the two
-pipelines back to back.
+    # Streaming + federated summary tables (inventory + iso-accept + ...):
+    python -m stream_active_fl.analysis --summary --csv-dir reports
 
-All heavy lifting lives in analysis_helpers; this script is a thin
-driver so notebooks and CI can share the same code.
+    # Federated only (e.g. after a fresh batch of fed_* runs):
+    python -m stream_active_fl.analysis --pipeline federated --summary \\
+        --csv-dir reports
+
+    # Just one variant family:
+    python -m stream_active_fl.analysis --pipeline streaming \\
+        --variants no_filter_cityday_curated static_p15_cityday_curated
+
+Without ``--csv-dir`` the tables are only printed; with it they are also
+written as CSVs under that directory.  With ``--pipeline federated``
+the script analyzes the federated outputs; ``--pipeline both`` runs the
+two pipelines back to back.
+
+All heavy lifting lives in the sibling submodules; this driver is thin
+so notebooks and CLI share the same code.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import analysis_helpers as ah
+from . import federated as fa
+from . import runs as ah
+from . import streaming as sa
 
 
 def _round_floats(df: pd.DataFrame, ndigits: int = 4) -> pd.DataFrame:
@@ -63,8 +73,8 @@ def _min_compute_steps(
 ) -> dict[str, int]:
     """Smallest final training-step count per manifest family, across filter runs.
 
-    For streaming runs this reads checkpoints.csv (effective compute =
-    items processed); for federated runs it reads rounds.csv (sum of
+    For streaming runs this reads ``checkpoints.csv`` (effective compute =
+    items processed); for federated runs it reads ``rounds.csv`` (sum of
     per-client optimizer steps).  The resulting budget is the compute cap
     at which the no-filter baseline is evaluated for iso-compute mAP.
     """
@@ -114,10 +124,9 @@ def analyze_pipeline(
         print(f"No matching variants for pipeline={pipeline}.")
         return
 
-    base = (csv_dir / pipeline) if csv_dir else None
+    base = (csv_dir / pipeline / "tables") if csv_dir else None
     steps_by_manifest = _min_compute_steps(runs_df, pipeline, variants)
 
-    # (1) Per-(variant, seed) summary (uses the same helper as the notebooks).
     per_seed = ah.variant_summary_table(
         runs_df, pipeline, variants,
         target_optim_steps=steps_by_manifest,
@@ -133,7 +142,6 @@ def analyze_pipeline(
 
     project_root = ah.find_project_root(Path(__file__).resolve().parent)
 
-    # (2) Per-block accept-rate tables (one per variant, latest seed)
     per_block_rows: list[pd.DataFrame] = []
     for variant in variants:
         rdir = ah.pick_latest_run(runs_df, pipeline, variant)
@@ -158,7 +166,6 @@ def analyze_pipeline(
                base / "per_block_accept_rate.csv" if base else None,
                f"{pipeline} per-block accept rate")
 
-    # (3) Inter-refresh accept rate (window / reservoir runs only)
     seg_rows: list[pd.DataFrame] = []
     for variant in variants:
         rdir = ah.pick_latest_run(runs_df, pipeline, variant)
@@ -183,8 +190,45 @@ def analyze_pipeline(
                f"{pipeline} inter-refresh accept rates")
 
 
+def emit_summary_tables(
+    project_root: Path,
+    csv_dir: Optional[Path] = None,
+    *,
+    tail_k: int = 5,
+    pipeline: str = "streaming",
+) -> None:
+    """Compute every summary table via the pipeline-specific builder.
+
+    When ``csv_dir`` is provided each table is written under
+    ``csv_dir/<pipeline>/tables/`` (matching the layout
+    `analyze_pipeline` uses) so the CSVs sit next to the per-seed
+    summaries.
+
+    ``pipeline`` is ``"streaming"`` (default; calls
+    `streaming.build_summary_tables`) or ``"federated"`` (calls
+    `federated.build_summary_tables`).
+    """
+    if pipeline == "federated":
+        tables = fa.build_summary_tables(project_root=project_root, tail_k=tail_k)
+    elif pipeline == "streaming":
+        tables = sa.build_summary_tables(project_root=project_root, tail_k=tail_k)
+    else:
+        raise ValueError(f"unknown pipeline: {pipeline!r}")
+    base = (csv_dir / pipeline / "tables") if csv_dir else None
+    for name, df in tables.items():
+        if df.empty:
+            continue
+        out = df.reset_index() if df.index.name == "block" else df
+        _write(_round_floats(out),
+               base / f"{name}.csv" if base else None,
+               f"summary: {pipeline}: {name}")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    ap = argparse.ArgumentParser(
+        prog="python -m stream_active_fl.analysis",
+        description=__doc__.splitlines()[0] if __doc__ else "",
+    )
     ap.add_argument("--outputs", default="outputs",
                     help="Path to outputs root (default: outputs/).")
     ap.add_argument("--pipeline", choices=["streaming", "federated", "both"],
@@ -194,13 +238,33 @@ def main() -> None:
                          "Omit to include every discovered variant.")
     ap.add_argument("--csv-dir", default=None,
                     help="If set, write tables as CSV under this directory.")
+    ap.add_argument("--summary", dest="summary", action="store_true",
+                    help="Also emit the consolidated summary tables "
+                         "(inventory, iso-accept, per-block grids, "
+                         "ablations) for each requested pipeline.")
+    ap.add_argument("--summary-only", dest="summary_only",
+                    action="store_true",
+                    help="Skip per-pipeline run-level tables and emit only "
+                         "the consolidated summary tables.")
+    ap.add_argument("--tail-k", type=int, default=5,
+                    help="Smoothed-mAP tail window for summary tables (default 5).")
     args = ap.parse_args()
 
     outputs = Path(args.outputs).resolve()
     csv_dir = Path(args.csv_dir).resolve() if args.csv_dir else None
-    pipelines = ["streaming", "federated"] if args.pipeline == "both" else [args.pipeline]
-    for pl in pipelines:
-        analyze_pipeline(outputs, pl, variants=args.variants, csv_dir=csv_dir)
+
+    if not args.summary_only:
+        pipelines = ["streaming", "federated"] if args.pipeline == "both" else [args.pipeline]
+        for pl in pipelines:
+            analyze_pipeline(outputs, pl, variants=args.variants, csv_dir=csv_dir)
+
+    if args.summary or args.summary_only:
+        project_root = ah.find_project_root(Path(__file__).resolve().parent)
+        summary_pipelines = (["streaming", "federated"]
+                             if args.pipeline == "both" else [args.pipeline])
+        for pl in summary_pipelines:
+            emit_summary_tables(project_root, csv_dir,
+                                tail_k=args.tail_k, pipeline=pl)
 
 
 if __name__ == "__main__":

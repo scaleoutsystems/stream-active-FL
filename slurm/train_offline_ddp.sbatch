@@ -33,5 +33,5 @@ python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__ve
 export OMP_NUM_THREADS=2
 
 torchrun --nproc_per_node=4 \
-  experiments/offline_baseline.py \
-  --config configs/offline_baseline.yaml
+  experiments/offline.py \
+  --config configs/offline/baseline.yaml

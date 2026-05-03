@@ -59,3 +59,22 @@ extraPaths = [
     "/apps/USE/easybuild/staging/2023.1/software/SciPy-bundle/2023.07-gfbf-2023a/lib/python3.11/site-packages",
     "/apps/USE/easybuild/staging/2023.1/software/Pillow-SIMD/9.5.0-GCCcore-12.3.0/lib/python3.11/site-packages",
 ]
+
+# Pandas type stubs are very strict: every DataFrame[col] access widens to
+# Series, every comparison returns Series-or-NDArray, and DataFrame.sort_values
+# / .pivot / .dropna have many overloads that don't always match runtime usage.
+# Analysis modules are pure pandas plumbing where these false positives
+# dominate, so we relax the affected diagnostics there only.  Production code
+# (core, training, policies, runtime, tracking, experiments) keeps the strict
+# defaults.
+[[tool.basedpyright.executionEnvironments]]
+root = "src/stream_active_fl/analysis"
+reportArgumentType = "none"
+reportAttributeAccessIssue = "none"
+reportCallIssue = "none"
+reportGeneralTypeIssues = "none"
+reportIndexIssue = "none"
+reportOperatorIssue = "none"
+reportOptionalMemberAccess = "none"
+reportOptionalOperand = "none"
+reportReturnType = "none"

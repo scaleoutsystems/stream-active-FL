@@ -51,7 +51,7 @@ from stream_active_fl.evaluation import (  # noqa: E402
     attach_stream_blocks,
     evaluate_detection,
 )
-from stream_active_fl.experiment import (  # noqa: E402
+from stream_active_fl.runtime import (  # noqa: E402
     build_detector_from_config,
     resolve_manifest_path,
 )
@@ -145,7 +145,7 @@ def _load_run_config(run_dir: Path) -> Dict[str, Any]:
 def _build_model_from_run_config(cfg: Dict[str, Any]) -> torch.nn.Module:
     """Instantiate a Detector sized to match the saved checkpoint.
 
-    Mirrors the runtime override in experiments/streaming_detection.py: when
+    Mirrors the runtime override in experiments/streaming.py: when
     target_classes is set, the model's output dimensionality is driven by
     build_class_mapping(target_classes).num_classes (background + targets),
     not by the num_classes field written into config.yaml.

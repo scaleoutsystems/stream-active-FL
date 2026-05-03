@@ -328,6 +328,15 @@ class DistributionBasedPolicy(FilterPolicy):
         reg = 1e-5 * torch.eye(self.cov.shape[0])
         self._cov_inv: torch.Tensor = torch.linalg.inv(self.cov + reg)
 
+        # Optional second Gaussian for two-reference (multimodal) scoring.
+        # When set, _compute_score returns min(d_primary, d_secondary), so a
+        # frame is "novel" only if it is far from BOTH known modes.  Populated
+        # by apply_refresh when scoring_reference_mode == "two_reference"; left
+        # None for the default single-reference behavior.
+        self.mean2: Optional[torch.Tensor] = None
+        self.cov2: Optional[torch.Tensor] = None
+        self._cov_inv2: Optional[torch.Tensor] = None
+
         self._scoring_model = scoring_model
         self._threshold: float = self._percentile(bootstrap_scores, threshold_percentile)
 
@@ -359,10 +368,25 @@ class DistributionBasedPolicy(FilterPolicy):
         return float(arr[idx])
 
     def _compute_score(self, embedding: torch.Tensor) -> float:
-        """Mahalanobis distance from embedding to the reference mean."""
+        """Mahalanobis distance from embedding to the reference distribution.
+
+        Single-reference mode: distance to the (mean, cov) Gaussian.
+
+        Two-reference mode (mean2/cov2 set): min(d_primary, d_secondary),
+        where the primary Gaussian is fitted on bootstrap frames and the
+        secondary on the accepted-frame window/reservoir.  A frame is
+        "novel" only when it is far from BOTH known modes, which avoids
+        the unimodal-fit pathology where a fat single Gaussian over a
+        bimodal reference set treats inter-mode points as familiar.
+        """
         emb = embedding.float()
-        diff = emb - self.mean
-        return float(torch.sqrt(diff @ self._cov_inv @ diff).item())
+        diff1 = emb - self.mean
+        d1 = float(torch.sqrt(diff1 @ self._cov_inv @ diff1).item())
+        if self.mean2 is None or self._cov_inv2 is None:
+            return d1
+        diff2 = emb - self.mean2
+        d2 = float(torch.sqrt(diff2 @ self._cov_inv2 @ diff2).item())
+        return min(d1, d2)
 
     def _get_threshold(self) -> float:
         return self._threshold
@@ -451,6 +475,8 @@ class DistributionBasedPolicy(FilterPolicy):
         mean: torch.Tensor,
         cov: torch.Tensor,
         scores: torch.Tensor,
+        mean2: Optional[torch.Tensor] = None,
+        cov2: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Replace scoring model, reference, and threshold atomically.
 
@@ -458,14 +484,38 @@ class DistributionBasedPolicy(FilterPolicy):
         window through a fresh snapshot of the live training model.  The new
         threshold is recomputed at threshold_percentile so the static and
         adaptive filters share one calibration rule.
+
+        Two-reference mode: when mean2 and cov2 are provided, they replace
+        the secondary Gaussian and `scores` is expected to be the per-frame
+        min(d_primary, d_secondary) over the union reference set, so the
+        threshold percentile keeps the same intuitive meaning ("top-p of
+        union distances are above threshold") under either mode.  Passing
+        only one of mean2/cov2 is rejected.
         """
         threshold_before = self._threshold
+
+        if (mean2 is None) ^ (cov2 is None):
+            raise ValueError(
+                "apply_refresh: mean2 and cov2 must be provided together "
+                "(or both omitted for single-reference mode).",
+            )
 
         self._scoring_model = scoring_model
         self.mean = mean.clone().float()
         self.cov = cov.clone().float()
         reg = 1e-5 * torch.eye(self.cov.shape[0])
         self._cov_inv = torch.linalg.inv(self.cov + reg)
+
+        if mean2 is not None and cov2 is not None:
+            self.mean2 = mean2.clone().float()
+            self.cov2 = cov2.clone().float()
+            reg2 = 1e-5 * torch.eye(self.cov2.shape[0])
+            self._cov_inv2 = torch.linalg.inv(self.cov2 + reg2)
+        else:
+            self.mean2 = None
+            self.cov2 = None
+            self._cov_inv2 = None
+
         self._threshold = self._percentile(scores, self.threshold_percentile)
 
         self.num_refreshes += 1
@@ -477,6 +527,7 @@ class DistributionBasedPolicy(FilterPolicy):
             "threshold_before": float(threshold_before),
             "threshold_after": float(self._threshold),
             "reference_size": int(scores.numel()),
+            "two_reference_active": self.mean2 is not None,
         }
 
     def get_stats(self) -> Dict[str, Any]:
@@ -924,8 +975,13 @@ class MixturePolicy(FilterPolicy):
         record_fn = getattr(self.inner, "_record_accepted", None)
         if record_fn is None:
             return
-        if hasattr(self.inner, "count_accept"):
-            self.inner.count_accept += 1
+        # `count_accept` only exists on signal-based inner policies (those
+        # with a reservoir/window).  Use getattr/setattr so the type
+        # checker doesn't see this as an attribute access on the abstract
+        # FilterPolicy base.
+        cur = getattr(self.inner, "count_accept", None)
+        if cur is not None:
+            setattr(self.inner, "count_accept", cur + 1)
         record_fn(stream_item)
 
     def get_stats(self) -> Dict[str, Any]:

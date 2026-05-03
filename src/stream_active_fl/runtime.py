@@ -30,9 +30,21 @@ def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
     """
     Load a YAML config into a dataclass with strict unknown-key validation.
 
+    Unknown keys raise rather than being silently dropped, which catches
+    typos in long config files at load time.
+
+    Args:
+        config_cls: Target dataclass type.  Its field names define the
+            allowed top-level YAML keys.
+        path: Path to the YAML file.  The root must be a mapping.
+
+    Returns:
+        An instance of `config_cls` populated from the YAML mapping.
+
     Raises:
-        TypeError: If config_cls is not a dataclass type.
-        ValueError: If YAML root is not a mapping or contains unknown keys.
+        TypeError: If `config_cls` is not a dataclass type.
+        ValueError: If the YAML root is not a mapping, or it contains
+            keys not declared on `config_cls`.
     """
     if not is_dataclass(config_cls):
         raise TypeError(f"{config_cls} is not a dataclass type.")
@@ -60,11 +72,20 @@ def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
 
 
 def create_run_dir(base_output_dir: Path, seed: int | None = None) -> Path:
-    """Create a timestamped run directory under base_output_dir.
+    """Create a timestamped run directory under `base_output_dir`.
 
-    When seed is provided, the run is nested under seed_<N>/ so that
+    When `seed` is provided, the run is nested under `seed_<N>/` so that
     multi-seed experiments can coexist cleanly under the same base dir:
-        outputs/<exp>/seed_<N>/<timestamp>/
+    `outputs/<exp>/seed_<N>/<timestamp>/`.
+
+    Args:
+        base_output_dir: Parent directory; created lazily by this call.
+        seed: Optional random seed.  When set, an extra `seed_<N>/`
+            level is inserted between `base_output_dir` and the
+            timestamp.
+
+    Returns:
+        The newly created run directory.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if seed is not None:
@@ -81,9 +102,24 @@ def setup_run_dir(
     config_path: Path,
     seed: int | None = None,
 ) -> Path:
-    """Create run directory under output_dir and copy config there.
+    """Create a run directory and snapshot the config inside it.
 
-    Optionally nests under seed_<N>/ when seed is provided.
+    Convenience wrapper around `create_run_dir`: the run dir is created
+    under `project_root / output_dir` (resolving relative paths against
+    the project root) and the config file is copied to
+    `<run_dir>/config.yaml` so each run is self-describing.
+
+    Args:
+        project_root: Repository root; used to resolve a relative
+            `output_dir`.
+        output_dir: Either an absolute path or a path relative to
+            `project_root`.
+        config_path: Source YAML file to copy into the run directory.
+        seed: Optional random seed forwarded to `create_run_dir` to
+            nest the run under `seed_<N>/`.
+
+    Returns:
+        The created run directory containing a `config.yaml` snapshot.
     """
     run_dir = create_run_dir(project_root / Path(output_dir), seed=seed)
     shutil.copy(config_path, run_dir / "config.yaml")
@@ -92,12 +128,29 @@ def setup_run_dir(
 
 def resolve_manifest_path(project_root: Path, manifest_path: str | Path) -> Path:
     """
-    Resolve manifest path with optional shared-data override.
+    Resolve a manifest path with an optional shared-data override.
+
+    Manifests can live either inside the repo (under `data/`) or on a
+    shared filesystem pointed to by `$STREAM_ACTIVE_FL_DATA_ROOT`.  This
+    helper centralizes the resolution rule so all entry points behave
+    identically.
 
     Resolution order:
-      1) Absolute path as-is.
-      2) Path relative to project_root.
-      3) For paths under "data/", map to $STREAM_ACTIVE_FL_DATA_ROOT if set.
+        1. Absolute path: returned as-is.
+        2. Existing path relative to `project_root`: returned.
+        3. Path that begins with `data/`: rebased onto
+           `$STREAM_ACTIVE_FL_DATA_ROOT` when that environment variable
+           is set.
+        4. Fallback: returned as `project_root / manifest_path`
+           (caller will get a clear FileNotFoundError downstream).
+
+    Args:
+        project_root: Repository root used as the relative-path anchor.
+        manifest_path: Manifest file path as given in the YAML config.
+
+    Returns:
+        The resolved manifest path.  No existence check is performed
+        for the absolute-path branch.
     """
     resolved = Path(manifest_path)
     if not resolved.is_absolute():
@@ -121,10 +174,26 @@ def resolve_manifest_path(project_root: Path, manifest_path: str | Path) -> Path
 
 def build_detector_from_config(config: Any) -> Detector:
     """
-    Build a Detector from any config object with model-related fields.
+    Build a `Detector` from any config object with model-related fields.
 
-    Expected attributes: num_classes, trainable_backbone_layers,
-    image_min_size, image_max_size, pretrained_backbone, pretrained_detector.
+    Duck-typed by design: the streaming, federated, and offline configs
+    all share the same model fields, so this helper takes any object
+    that exposes them.
+
+    Args:
+        config: Any object with the following attributes:
+            - `num_classes` (int)
+            - `trainable_backbone_layers` (int)
+            - `image_min_size` (int)
+            - `image_max_size` (int)
+            - `pretrained_backbone` (bool)
+            - `pretrained_detector` (bool)
+
+    Returns:
+        A new `Detector` instance.
+
+    Raises:
+        AttributeError: If `config` is missing any required attribute.
     """
     return Detector(
         num_classes=config.num_classes,

@@ -35,7 +35,7 @@ python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__ve
 CONFIG_FILE="${CONFIG_FILE:-configs/federated/fed_no_filter_cityday_road_type.yaml}"
 echo "Config: $CONFIG_FILE"
 
-CMD=(python experiments/federated_detection.py --config "$CONFIG_FILE")
+CMD=(python experiments/federated.py --config "$CONFIG_FILE")
 if [[ -n "${BOOTSTRAP_RUN_DIR:-}" ]]; then
   # Resolve globs (e.g. "outputs/.../seed_43/*") to the newest matching dir,
   # so dependent jobs can be queued before the producing run exists.

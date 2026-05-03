@@ -2,8 +2,7 @@
 
 Buffer-based streaming active learning for object detection, with federated
 learning simulation. Compares distribution-based filtering against no-filter
-and random baselines in both centralized streaming and federated (FedAvg)
-settings, using ZOD Frames.
+and random baselines in both centralized streaming and federated settings, using ZOD Frames.
 
 ## Setup
 
@@ -43,21 +42,21 @@ export STREAM_ACTIVE_FL_PREPROCESSED_ROOT=/path/to/data/ZOD_frames_preprocessed
 
 ```bash
 # Streaming detection (bootstrap + online filtering)
-python experiments/streaming_detection.py \
+python experiments/streaming.py \
     --config configs/streaming/dist_thresh_cityday_road_type_p10.yaml
 
 # Federated streaming (FedAvg over client-local streams)
-python experiments/federated_detection.py \
+python experiments/federated.py \
     --config configs/federated/fed_dist_thresh_cityday_road_type_p10.yaml
 
 # Offline baseline (performance ceiling)
-python experiments/offline_baseline.py --config configs/offline_baseline.yaml
+python experiments/offline.py --config configs/offline/baseline.yaml
 ```
 
 Reuse a previous bootstrap to save time:
 
 ```bash
-python experiments/streaming_detection.py \
+python experiments/streaming.py \
     --config configs/streaming/dist_thresh_cityday_reverse_p10.yaml \
     --bootstrap-run-dir outputs/streaming/dist_thresh_cityday_road_type_p10/<run_id>
 ```

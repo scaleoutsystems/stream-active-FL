@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
 from stream_active_fl.core.items import StreamItem
+from stream_active_fl.policies import create_filter_policy
 from stream_active_fl.policies.filtering import (
     DetectionUncertaintyPolicy,
     DistributionBasedPolicy,
+    MixturePolicy,
     NoFilterPolicy,
     RandomPolicy,
 )
@@ -779,3 +782,331 @@ def test_uncertainty_window_apply_refresh_replaces_threshold():
     # Percentile 0.5 of length-5 scores -> idx = int(5 * 0.5) = 2 -> 0.6.
     assert policy._threshold == pytest.approx(0.6, abs=1e-6)
     assert record["threshold_after"] == pytest.approx(0.6, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# DistributionBasedPolicy: two-reference (multimodal) scoring
+# ---------------------------------------------------------------------------
+
+
+def test_dist_policy_two_reference_score_takes_min():
+    """`_compute_score` returns min(d_primary, d_secondary) when mean2/cov2 set."""
+    policy = _make_dist_policy(bootstrap_scores=[1.0, 2.0, 3.0])
+    policy.apply_refresh(
+        scoring_model=_MagnitudeScorer(embed_dim=4),
+        mean=torch.zeros(4),
+        cov=torch.eye(4),
+        scores=torch.tensor([1.0, 2.0, 3.0]),
+        mean2=torch.tensor([5.0, 0.0, 0.0, 0.0]),
+        cov2=torch.eye(4),
+    )
+
+    # Tolerance accommodates the 1e-5 covariance regularization eps used
+    # in apply_refresh; without that, distances would match exactly.
+    tol = 1e-3
+
+    # Probe near the second mode -> distance to mode 2 ~ 0, to mode 1 ~ 5.
+    near_mode2 = torch.tensor([5.0, 0.0, 0.0, 0.0])
+    s2 = policy._compute_score(near_mode2)
+    assert s2 == pytest.approx(0.0, abs=tol)
+
+    # Probe near the origin -> distance to mode 1 ~ 0, to mode 2 ~ 5.
+    near_mode1 = torch.zeros(4)
+    s1 = policy._compute_score(near_mode1)
+    assert s1 == pytest.approx(0.0, abs=tol)
+
+    # Probe between modes -> ~2.5 from each, min stays ~2.5.
+    between = torch.tensor([2.5, 0.0, 0.0, 0.0])
+    sm = policy._compute_score(between)
+    assert sm == pytest.approx(2.5, abs=tol)
+
+
+def test_dist_policy_two_reference_apply_refresh_single_then_two_then_back():
+    """Switching modes via apply_refresh leaves no stale secondary state."""
+    policy = _make_dist_policy(bootstrap_scores=[float(i) for i in range(10)])
+    assert policy.mean2 is None and policy._cov_inv2 is None
+
+    # Promote to two-reference.
+    policy.apply_refresh(
+        scoring_model=_MagnitudeScorer(embed_dim=4),
+        mean=torch.zeros(4),
+        cov=torch.eye(4),
+        scores=torch.tensor([1.0, 2.0, 3.0]),
+        mean2=torch.tensor([10.0, 0.0, 0.0, 0.0]),
+        cov2=torch.eye(4),
+    )
+    assert policy.mean2 is not None and policy._cov_inv2 is not None
+
+    # Demote back to single-reference; mean2/cov2 must be cleared.
+    policy.apply_refresh(
+        scoring_model=_MagnitudeScorer(embed_dim=4),
+        mean=torch.zeros(4),
+        cov=torch.eye(4),
+        scores=torch.tensor([1.0, 2.0, 3.0]),
+    )
+    assert policy.mean2 is None
+    assert policy.cov2 is None
+    assert policy._cov_inv2 is None
+
+
+def test_dist_policy_two_reference_partial_args_rejected():
+    """Passing only one of mean2/cov2 must raise (atomic two-ref state)."""
+    policy = _make_dist_policy(bootstrap_scores=[1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="must be provided together"):
+        policy.apply_refresh(
+            scoring_model=_MagnitudeScorer(embed_dim=4),
+            mean=torch.zeros(4),
+            cov=torch.eye(4),
+            scores=torch.tensor([1.0]),
+            mean2=torch.ones(4),
+            cov2=None,  # only one provided
+        )
+
+
+# ---------------------------------------------------------------------------
+# MixturePolicy
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysAcceptInner(NoFilterPolicy):
+    """Stand-in inner policy that records into a list and always accepts."""
+
+    def __init__(self):
+        super().__init__()
+        self.recorded: list[str] = []
+        self.count_accept = 0  # exposed for MixturePolicy._record_into_inner
+
+    def _record_accepted(self, item: StreamItem) -> None:
+        self.recorded.append(item.metadata["frame_id"])
+
+
+def test_mixture_policy_validates_arguments():
+    inner = NoFilterPolicy()
+    with pytest.raises(ValueError, match="mixture_gamma"):
+        MixturePolicy(inner=inner, mixture_gamma=1.5, accept_fraction=0.1)
+    with pytest.raises(ValueError, match="accept_fraction"):
+        MixturePolicy(inner=inner, mixture_gamma=0.5, accept_fraction=2.0)
+
+
+def test_mixture_policy_gamma_one_is_pure_signal():
+    """gamma=1 routes every frame to the inner policy."""
+    inner = NoFilterPolicy()
+    policy = MixturePolicy(
+        inner=inner, mixture_gamma=1.0, accept_fraction=0.0, rng_seed=0,
+    )
+    model, device = _DummyModel(), torch.device("cpu")
+    for i in range(50):
+        action, meta = policy.select_action(
+            _make_item(frame_id=f"f{i}"), model, device,
+        )
+        assert action == "accept"
+        assert meta["path"] == "signal"
+
+    assert policy.count_signal_path == 50
+    assert policy.count_random_path == 0
+    assert policy.count_accept_signal == 50
+    assert policy.count_accept_random == 0
+
+
+def test_mixture_policy_gamma_zero_is_pure_random():
+    """gamma=0 routes every frame to the random path; accept_fraction governs."""
+    policy = MixturePolicy(
+        inner=NoFilterPolicy(),
+        mixture_gamma=0.0,
+        accept_fraction=1.0,
+        rng_seed=0,
+    )
+    model, device = _DummyModel(), torch.device("cpu")
+    for i in range(20):
+        action, meta = policy.select_action(
+            _make_item(frame_id=f"f{i}"), model, device,
+        )
+        assert action == "accept"
+        assert meta["path"] == "random"
+    assert policy.count_random_path == 20
+    assert policy.count_signal_path == 0
+
+
+def test_mixture_policy_random_accepts_recorded_into_inner_reservoir():
+    """Random-path accepts must enter the inner policy's accepted-frame buffer.
+
+    This is the contract that makes the refresh see the actual training
+    distribution rather than only the signal-selected subset.
+    """
+    inner = _make_dist_policy(
+        bootstrap_scores=[float(i) for i in range(100)],
+        refresh_window_size=20,
+    )
+    policy = MixturePolicy(
+        inner=inner, mixture_gamma=0.0, accept_fraction=1.0, rng_seed=0,
+    )
+    model, device = _DummyModel(), torch.device("cpu")
+
+    for i in range(15):
+        policy.select_action(
+            _make_item(image=_image_with_mean(99.0), frame_id=f"f{i}"),
+            model, device,
+        )
+    # All 15 accepts traveled the random path; all should be in the inner window.
+    assert inner.get_accepted_frame_ids() == [f"f{i}" for i in range(15)]
+
+
+def test_mixture_policy_gamma_routing_matches_seed():
+    """Same seed -> identical signal/random routing pattern."""
+    seq = []
+    for _ in range(2):
+        policy = MixturePolicy(
+            inner=NoFilterPolicy(),
+            mixture_gamma=0.5,
+            accept_fraction=0.5,
+            rng_seed=99,
+        )
+        actions = []
+        for i in range(50):
+            _, meta = policy.select_action(
+                _make_item(frame_id=f"f{i}"),
+                _DummyModel(),
+                torch.device("cpu"),
+            )
+            actions.append(meta["path"])
+        seq.append(tuple(actions))
+    assert seq[0] == seq[1]
+
+
+def test_mixture_policy_stats_include_inner():
+    inner = RandomPolicy(accept_fraction=1.0)
+    policy = MixturePolicy(
+        inner=inner, mixture_gamma=0.5, accept_fraction=0.5, rng_seed=0,
+    )
+    for i in range(10):
+        policy.select_action(
+            _make_item(frame_id=f"f{i}"), _DummyModel(), torch.device("cpu"),
+        )
+    stats = policy.get_stats()
+    assert stats["count_signal_path"] + stats["count_random_path"] == 10
+    assert "inner_accept_fraction" in stats
+
+
+# ---------------------------------------------------------------------------
+# create_filter_policy (config-driven dispatch)
+# ---------------------------------------------------------------------------
+
+
+class _PolicyCfg:
+    """Minimal duck-typed config for create_filter_policy."""
+
+    def __init__(self, **kwargs):
+        self.filter_policy = kwargs.pop("filter_policy", "none")
+        self.accept_fraction = kwargs.pop("accept_fraction", 0.1)
+        self.threshold_percentile = kwargs.pop("threshold_percentile", 0.10)
+        self.scoring_refresh_window_size = kwargs.pop("scoring_refresh_window_size", 0)
+        self.scoring_refresh_reservoir_size = kwargs.pop(
+            "scoring_refresh_reservoir_size", 0,
+        )
+        self.uncertainty_top_k = kwargs.pop("uncertainty_top_k", 5)
+        self.uncertainty_score_mode = kwargs.pop("uncertainty_score_mode", "topk_mean")
+        self.mixture_gamma = kwargs.pop("mixture_gamma", 0.5)
+        self.seed = kwargs.pop("seed", 0)
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def test_create_filter_policy_none():
+    pol = create_filter_policy(_PolicyCfg(filter_policy="none"))
+    assert isinstance(pol, NoFilterPolicy)
+
+
+def test_create_filter_policy_random():
+    pol = create_filter_policy(_PolicyCfg(filter_policy="random", accept_fraction=0.3))
+    assert isinstance(pol, RandomPolicy)
+    assert pol.accept_fraction == pytest.approx(0.3)
+
+
+def test_create_filter_policy_distribution_requires_bootstrap():
+    cfg = _PolicyCfg(filter_policy="distribution")
+    with pytest.raises(ValueError, match="bootstrap_mean"):
+        create_filter_policy(cfg)
+
+
+def test_create_filter_policy_distribution_full():
+    cfg = _PolicyCfg(
+        filter_policy="distribution",
+        scoring_refresh_window_size=10,
+    )
+    pol = create_filter_policy(
+        cfg,
+        bootstrap_mean=torch.zeros(4),
+        bootstrap_cov=torch.eye(4),
+        scoring_model=_MagnitudeScorer(embed_dim=4),
+        bootstrap_scores=[float(i) for i in range(50)],
+    )
+    assert isinstance(pol, DistributionBasedPolicy)
+    assert pol.refresh_window_size == 10
+
+
+def test_create_filter_policy_uncertainty_full():
+    cfg = _PolicyCfg(filter_policy="uncertainty", uncertainty_top_k=3)
+    pol = create_filter_policy(
+        cfg,
+        scoring_model=_ConstantUncertaintyDetector(),
+        bootstrap_scores=[0.1, 0.5, 0.9],
+    )
+    assert isinstance(pol, DetectionUncertaintyPolicy)
+
+
+def test_create_filter_policy_mixed_distribution_wraps_inner():
+    cfg = _PolicyCfg(
+        filter_policy="mixed_distribution",
+        mixture_gamma=0.3,
+        accept_fraction=0.1,
+    )
+    pol = create_filter_policy(
+        cfg,
+        bootstrap_mean=torch.zeros(4),
+        bootstrap_cov=torch.eye(4),
+        scoring_model=_MagnitudeScorer(embed_dim=4),
+        bootstrap_scores=[float(i) for i in range(50)],
+    )
+    assert isinstance(pol, MixturePolicy)
+    assert isinstance(pol.inner, DistributionBasedPolicy)
+    assert pol.mixture_gamma == pytest.approx(0.3)
+
+
+def test_create_filter_policy_unknown_rejected():
+    with pytest.raises(ValueError, match="Unknown filter policy"):
+        create_filter_policy(_PolicyCfg(filter_policy="banana"))
+
+
+def test_create_filter_policy_reservoir_seed_override_used():
+    """Override flows into the policy's reservoir RNG (federated path)."""
+    cfg = _PolicyCfg(
+        filter_policy="distribution",
+        scoring_refresh_reservoir_size=5,
+        seed=0,
+    )
+    bootstrap_mean = torch.zeros(4)
+    bootstrap_cov = torch.eye(4)
+    bootstrap_scores = [float(i) for i in range(50)]
+
+    def _build(seed_override: int) -> DistributionBasedPolicy:
+        pol = create_filter_policy(
+            cfg,
+            reservoir_seed_override=seed_override,
+            bootstrap_mean=bootstrap_mean,
+            bootstrap_cov=bootstrap_cov,
+            scoring_model=_MagnitudeScorer(embed_dim=4),
+            bootstrap_scores=bootstrap_scores,
+        )
+        assert isinstance(pol, DistributionBasedPolicy)
+        return pol
+
+    a = _build(1)
+    b = _build(2)
+
+    # Drive 100 accepts; reservoirs of size 5 differ if seeds differ.
+    model, device = _DummyModel(), torch.device("cpu")
+    for i in range(100):
+        item = _make_item(image=_image_with_mean(99.0), frame_id=f"f{i}")
+        a.select_action(item, model, device)
+        b.select_action(item, model, device)
+    assert a.get_accepted_frame_ids() != b.get_accepted_frame_ids()

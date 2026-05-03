@@ -35,7 +35,7 @@ mkdir -p "$LOG_DIR"
 # Default: full regeneration at legacy bootstrap size (5000).
 # To regenerate bootstraps + shared manifests at an alternative size,
 # override VARIANTS and BOOTSTRAP_N, e.g.:
-#   sbatch --export=ALL,VARIANTS="",BOOTSTRAP_N=2000 slurm/manifests.sbatch
+#   sbatch --export=ALL,VARIANTS="",BOOTSTRAP_N=2000 slurm/build_manifests.sbatch
 # (VARIANTS="" skips the ordering-only manifests, which do not depend on
 #  bootstrap size and are unchanged.)
 VARIANTS="${VARIANTS:-base temporal road_type road_type_reverse road_type_time conditions urban_rural cityday_curated}"
@@ -49,4 +49,6 @@ CMD=(python tools/preprocessing/build_manifests.py
      --generate-bootstraps
      --generate-shared-manifests
      --variants $VARIANTS)
-srun "${CMD[@]}"
+# Run directly (not under srun) so SLURM does not launch one task per CPU,
+# which caused concurrent writers to race on the output JSON files.
+"${CMD[@]}"

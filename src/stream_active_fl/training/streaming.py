@@ -15,7 +15,18 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sized, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sized,
+    Tuple,
+    overload,
+)
 
 import torch
 import torch.nn as nn
@@ -23,7 +34,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ..core.items import StreamItem
-from ..logging import StreamingMetricsLogger
+from ..tracking import StreamingMetricsLogger
 from ..memory import TrainingBuffer
 from ..policies import FilterPolicy
 
@@ -149,13 +160,40 @@ def bootstrap_train(
 
 
 @torch.no_grad()
+@overload
+def collect_embeddings(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    progress_bar: bool = ...,
+    use_amp: bool = ...,
+    *,
+    return_embeddings: Literal[False] = ...,
+) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]: ...
+
+
+@overload
+def collect_embeddings(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    progress_bar: bool = ...,
+    use_amp: bool = ...,
+    *,
+    return_embeddings: Literal[True],
+) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]: ...
+
+
 def collect_embeddings(
     model: nn.Module,
     data_loader: DataLoader,
     device: torch.device,
     progress_bar: bool = True,
     use_amp: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+    return_embeddings: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor] | Tuple[
+    torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor
+]:
     """
     Collect backbone embeddings for all frames in a DataLoader.
 
@@ -171,11 +209,16 @@ def collect_embeddings(
         use_amp: Run embedding forward pass under torch.cuda.amp.autocast
             to speed up refresh; embeddings are cast back to float32 for
             numerically stable mean/covariance/Mahalanobis computation.
+        return_embeddings: If True, also return the raw (N, D) embedding
+            tensor.  Used by the two-reference refresh path which needs
+            per-frame distances against a second Gaussian fitted on a
+            different frame set.
 
     Returns:
-        (mean, cov, count, scores): Mean vector (D,), covariance matrix
-        (D, D), number of embeddings, and per-frame Mahalanobis distances
-        (N,) used for bootstrap-calibrated threshold initialisation.
+        (mean, cov, count, scores) or, when return_embeddings=True,
+        (mean, cov, count, scores, embeddings).  scores are the per-frame
+        Mahalanobis distances of the input frames against the
+        (mean, cov) Gaussian fitted on those same frames.
     """
     was_training = model.training
     model.eval()
@@ -208,7 +251,42 @@ def collect_embeddings(
         (centered @ cov_inv * centered).sum(dim=1)
     )  # (N,) Mahalanobis distances
 
+    if return_embeddings:
+        return mean, cov, int(len(embeddings)), scores, embeddings
     return mean, cov, int(len(embeddings)), scores
+
+
+def mahalanobis_distances(
+    embeddings: torch.Tensor,
+    mean: torch.Tensor,
+    cov: torch.Tensor,
+    *,
+    cov_inv: Optional[torch.Tensor] = None,
+    reg_eps: float = 1e-5,
+) -> torch.Tensor:
+    """Per-row Mahalanobis distance of `embeddings` (N, D) to (mean, cov).
+
+    Args:
+        embeddings: (N, D) float tensor.
+        mean: (D,) float tensor.
+        cov: (D, D) float tensor.
+        cov_inv: Optional precomputed (D, D) inverse covariance.  Avoids
+            a redundant inv when the caller already has it.
+        reg_eps: Regularization added to the covariance diagonal before
+            inversion for numerical stability.  Ignored when cov_inv is
+            provided.
+
+    Returns:
+        (N,) tensor of Mahalanobis distances, all on CPU/float32.
+    """
+    emb = embeddings.float()
+    mu = mean.float()
+    if cov_inv is None:
+        sigma = cov.float()
+        reg = reg_eps * torch.eye(sigma.shape[0], dtype=sigma.dtype, device=sigma.device)
+        cov_inv = torch.linalg.inv(sigma + reg)
+    centered = emb - mu.unsqueeze(0)
+    return torch.sqrt((centered @ cov_inv * centered).sum(dim=1))
 
 
 @torch.no_grad()

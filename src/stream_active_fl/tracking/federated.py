@@ -9,6 +9,11 @@ Detection columns align with offline (epochs.csv) and streaming (checkpoints.csv
 - Counts: num_items, total_predictions, total_ground_truth
 - Per-class: AP_Vehicle, AP_VulnerableVehicle, ... (from CATEGORY_ID_TO_NAME)
 
+Per-domain detection metrics are emitted into per_domain_checkpoints.csv
+in the same long-format schema as the streaming logger, so the same
+downstream analysis modules read either pipeline's output without
+modification.
+
 Per-frame filter decisions are written to decisions.csv by
 FederatedDecisionsLogger, mirroring the streaming decisions log with
 additional round and client_id columns.
@@ -20,9 +25,10 @@ import csv
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 from ..core import CATEGORY_ID_TO_NAME
+from ..evaluation import EXTENDED_DOMAIN_DIMS
 
 _CLASSIFICATION_EVAL_COLS: List[str] = ["loss", "accuracy", "precision", "recall", "f1"]
 _DETECTION_COUNT_COLS: List[str] = ["num_items", "total_predictions", "total_ground_truth"]
@@ -54,17 +60,19 @@ class FederatedMetricsLogger:
         self.task = task
 
         names = list(class_names) if class_names is not None else _DEFAULT_CLASS_NAMES
-        per_class_cols = [f"AP_{name}" for name in names]
+        self._class_names = list(names)
+        self._per_class_ap_cols = [f"AP_{name}" for name in names]
 
         if task == "detection":
-            self._eval_cols = ["mAP", "mAP_50", "mAP_75"] + _DETECTION_COUNT_COLS + per_class_cols
+            self._eval_cols = ["mAP", "mAP_50", "mAP_75"] + _DETECTION_COUNT_COLS + self._per_class_ap_cols
         else:
             self._eval_cols = _CLASSIFICATION_EVAL_COLS
 
         self.rounds_file = self.log_dir / "rounds.csv"
         with open(self.rounds_file, "w", newline="") as f:
             writer = csv.writer(f)
-            header = ["round", "elapsed_seconds"] + list(self._eval_cols)
+            header = ["round", "elapsed_seconds", "items_processed_total",
+                      "optimizer_steps_total"] + list(self._eval_cols)
             for c in range(num_clients):
                 header += [
                     f"client_{c}_items",
@@ -74,6 +82,18 @@ class FederatedMetricsLogger:
                 ]
             writer.writerow(header)
 
+        # Per-domain checkpoints are emitted in the same long-format schema
+        # as the streaming logger so analysis modules can load both
+        # pipelines uniformly via load_per_domain_checkpoints().
+        self.per_domain_checkpoints_file = self.log_dir / "per_domain_checkpoints.csv"
+        self._per_domain_header_written = False
+
+        # Cumulative tallies across all rounds; used as the analogue of
+        # streaming's items_processed / optimizer_steps so iso-compute
+        # comparisons (which key off optimizer_steps) work uniformly.
+        self._items_processed_total: int = 0
+        self._optimizer_steps_total: int = 0
+
     def log_round(
         self,
         round_idx: int,
@@ -81,8 +101,17 @@ class FederatedMetricsLogger:
         client_results: list[dict],
         elapsed: float,
     ) -> None:
-        """Append one row to rounds.csv."""
-        row: list = [round_idx, f"{elapsed:.1f}"]
+        """Append one row to rounds.csv (and per_domain_checkpoints.csv if relevant)."""
+        for cr in client_results:
+            self._items_processed_total += int(cr.get("items_processed", 0))
+            self._optimizer_steps_total += int(cr.get("optimizer_steps", 0))
+
+        row: list = [
+            round_idx,
+            f"{elapsed:.1f}",
+            self._items_processed_total,
+            self._optimizer_steps_total,
+        ]
         if eval_metrics is not None:
             row += [f"{eval_metrics.get(k, 0.0):.4f}" for k in self._eval_cols]
         else:
@@ -97,6 +126,76 @@ class FederatedMetricsLogger:
 
         with open(self.rounds_file, "a", newline="") as f:
             csv.writer(f).writerow(row)
+
+        if eval_metrics is not None and self.task == "detection":
+            self._log_per_domain(round_idx, elapsed, eval_metrics)
+
+    def _log_per_domain(
+        self,
+        round_idx: int,
+        elapsed: float,
+        eval_metrics: Dict[str, float],
+    ) -> None:
+        """Emit long-format per-(dim, bucket) rows when present in metrics.
+
+        Schema is identical to ``StreamingMetricsLogger._log_per_domain``
+        so ``stream_active_fl.analysis.runs.load_per_domain_checkpoints``
+        reads either without case logic.  ``checkpoint_idx`` is the
+        federated round.
+        """
+        bucket_keys: List[tuple] = []
+        dim_prefixes = sorted(
+            [(f"mAP_{d}_", d) for d in EXTENDED_DOMAIN_DIMS],
+            key=lambda p: len(p[0]),
+            reverse=True,
+        )
+        for key in eval_metrics:
+            for prefix, dim in dim_prefixes:
+                if key.startswith(prefix):
+                    bucket = key[len(prefix):]
+                    if bucket:
+                        bucket_keys.append((dim, bucket))
+                    break
+
+        if not bucket_keys:
+            return
+
+        if not self._per_domain_header_written:
+            with open(self.per_domain_checkpoints_file, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "checkpoint_idx",
+                    "items_processed",
+                    "optimizer_steps",
+                    "elapsed_seconds",
+                    "dimension",
+                    "bucket",
+                    "n_frames",
+                    "mAP",
+                    "mAP_50",
+                    "mAP_75",
+                ] + self._per_class_ap_cols)
+            self._per_domain_header_written = True
+
+        with open(self.per_domain_checkpoints_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            for dim, bucket in sorted(set(bucket_keys)):
+                tag = f"{dim}_{bucket}"
+                n = eval_metrics.get(f"n_{tag}", 0.0)
+                row = [
+                    round_idx,
+                    self._items_processed_total,
+                    self._optimizer_steps_total,
+                    f"{elapsed:.2f}",
+                    dim,
+                    bucket,
+                    int(n),
+                    f"{eval_metrics.get(f'mAP_{tag}', 0.0):.4f}",
+                    f"{eval_metrics.get(f'mAP_50_{tag}', 0.0):.4f}",
+                    f"{eval_metrics.get(f'mAP_75_{tag}', 0.0):.4f}",
+                ]
+                for cls in self._class_names:
+                    row.append(f"{eval_metrics.get(f'AP_{cls}_{tag}', 0.0):.4f}")
+                writer.writerow(row)
 
 
 class FederatedDecisionsLogger:

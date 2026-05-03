@@ -35,7 +35,7 @@ python -c "import sys, torch; print(f'python={sys.executable}  torch={torch.__ve
 CONFIG_FILE="${CONFIG_FILE:-configs/streaming/no_filter_cityday_road_type.yaml}"
 echo "Config: $CONFIG_FILE"
 
-CMD=(python experiments/streaming_detection.py --config "$CONFIG_FILE")
+CMD=(python experiments/streaming.py --config "$CONFIG_FILE")
 if [[ -n "${BOOTSTRAP_RUN_DIR:-}" ]]; then
   # Resolve globs (e.g. "outputs/.../seed_43/*") to the newest matching dir,
   # so dependent jobs can be queued before the producing run exists.
