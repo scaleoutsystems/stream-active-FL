@@ -26,6 +26,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np
 from PIL import Image
@@ -79,7 +80,9 @@ def scale_box(xyxy: np.ndarray) -> list[float]:
     return [x1 * sx, y1 * sy, x2 * sx, y2 * sy]
 
 
-def process_frame(zod_frame, frame_id: str, images_dir: Path, annotations_dir: Path) -> dict | None:
+def process_frame(
+    zod_frame, frame_id: str, images_dir: Path, annotations_dir: Path,
+) -> Optional[Dict[str, Any]]:
     """Process a single ZOD frame: crop, resize, extract annotations."""
     from zod.constants import Anonymization, AnnotationProject
 

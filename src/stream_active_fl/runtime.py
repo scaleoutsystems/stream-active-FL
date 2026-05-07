@@ -12,7 +12,7 @@ import shutil
 from dataclasses import is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Optional, TypeVar
 
 import yaml
 
@@ -71,7 +71,7 @@ def load_dataclass_config(config_cls: type[T], path: str | Path) -> T:
 # =============================================================================
 
 
-def create_run_dir(base_output_dir: Path, seed: int | None = None) -> Path:
+def create_run_dir(base_output_dir: Path, seed: Optional[int] = None) -> Path:
     """Create a timestamped run directory under `base_output_dir`.
 
     When `seed` is provided, the run is nested under `seed_<N>/` so that
@@ -100,7 +100,7 @@ def setup_run_dir(
     project_root: Path,
     output_dir: str | Path,
     config_path: Path,
-    seed: int | None = None,
+    seed: Optional[int] = None,
 ) -> Path:
     """Create a run directory and snapshot the config inside it.
 

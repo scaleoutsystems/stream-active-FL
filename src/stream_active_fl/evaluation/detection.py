@@ -220,8 +220,15 @@ def _metrics_over_indices(
 ) -> Dict[str, float]:
     """Compute mAP, mAP_50, mAP_75, and per-class AP on a frame-index subset.
 
-    prefix is prepended to the returned keys (e.g. 'tod_night' yields
-    'mAP_tod_night' and 'AP_Vehicle_tod_night').  Empty string means aggregate.
+    Non-empty prefix: each metric stem (mAP, mAP_50, mAP_75, prediction/GT
+    counts, and per-class AP column names) is suffixed with _{prefix}, matching
+    the per-domain mAP_{dim}_{bucket} / AP_{class}_{dim}_{bucket} layout from
+    the module docstring.  `evaluate_detection` passes prefix as "{dim}_{bucket}"
+    per bucket (e.g. time_of_day_night -> mAP_time_of_day_night,
+    AP_Vehicle_time_of_day_night).
+
+    Empty prefix: aggregate metrics only (mAP, mAP_50, mAP_75, per-class AP
+    columns, and counts).
     """
     sub_pred_boxes = [all_pred_boxes[i] for i in indices]
     sub_pred_scores = [all_pred_scores[i] for i in indices]

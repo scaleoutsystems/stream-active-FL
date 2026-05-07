@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import List, Optional, Set
+
 import pytest
 import torch
 import torch.nn as nn
@@ -19,9 +21,9 @@ from stream_active_fl.policies.refresh import pool_recent_accepted
 
 
 def _make_item(
-    categories: set[str] | None = None,
+    categories: Optional[Set[str]] = None,
     frame_id: str = "test",
-    image: torch.Tensor | None = None,
+    image: Optional[torch.Tensor] = None,
 ) -> StreamItem:
     return StreamItem(
         image=image if image is not None else torch.rand(3, 32, 32),
@@ -437,7 +439,7 @@ def _make_reservoir_policy(
     *,
     reservoir_size: int,
     reservoir_seed: int = 0,
-    bootstrap_scores: list[float] | None = None,
+    bootstrap_scores: Optional[List[float]] = None,
     threshold_percentile: float = 0.10,
 ) -> DistributionBasedPolicy:
     """Identity-covariance / zero-mean policy with reservoir mode enabled."""

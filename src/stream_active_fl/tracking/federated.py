@@ -42,7 +42,7 @@ class FederatedMetricsLogger:
     server-side evaluation metrics and per-client training counts.
 
     Args:
-        log_dir: Directory to write rounds.csv into.
+        log_dir: Directory to write rounds.csv into (created if missing).
         num_clients: Number of clients (determines per-client columns).
         task: "classification" or "detection".
         class_names: Class names for per-class AP columns (detection only).
@@ -57,6 +57,7 @@ class FederatedMetricsLogger:
         class_names: Optional[Sequence[str]] = None,
     ):
         self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         self.task = task
 
         names = list(class_names) if class_names is not None else _DEFAULT_CLASS_NAMES
