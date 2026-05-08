@@ -47,7 +47,9 @@ Public surface (the things the notebook actually calls):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
+)
 
 import numpy as np
 import pandas as pd
@@ -66,6 +68,7 @@ FEATURED_VARIANTS: List[str] = [
     "no_filter_cityday_curated",
     "random_p17_cityday_curated",
     "random_p21_cityday_curated",
+    "random_p26_cityday_curated",
     "random_p29_cityday_curated",
     "random_p33_cityday_curated",
     "random_p73_cityday_curated",
@@ -83,6 +86,12 @@ FEATURED_VARIANTS: List[str] = [
     "adaptive_reservoir_p20_cityday_curated",
     "adaptive_reservoir_p20_twoRef_cityday_curated",
     "adaptive_reservoir_p20_noBoot_cityday_curated",
+    # Matched-memory window-vs-reservoir comparison at memory size 1500
+    # (mirrors the federated chapter's per-client memory budget).
+    "adaptive_window_p20_m1500_cityday_curated",
+    "adaptive_window_p20_twoRef_m1500_cityday_curated",
+    "adaptive_reservoir_p20_m1500_cityday_curated",
+    "adaptive_reservoir_p20_twoRef_m1500_cityday_curated",
     # Cross-stream-order replication (temporal)
     "no_filter_cityday_temporal",
     "random_p21_cityday_temporal",
@@ -101,6 +110,7 @@ VARIANT_LABEL: Dict[str, str] = {
     "no_filter_cityday_curated":                          "none",
     "random_p17_cityday_curated":                         "random p17",
     "random_p21_cityday_curated":                         "random p21",
+    "random_p26_cityday_curated":                         "random p26",
     "random_p29_cityday_curated":                         "random p29",
     "random_p33_cityday_curated":                         "random p33",
     "random_p73_cityday_curated":                         "random p73",
@@ -117,6 +127,12 @@ VARIANT_LABEL: Dict[str, str] = {
     "adaptive_reservoir_p20_cityday_curated":             "reservoir p20",
     "adaptive_reservoir_p20_twoRef_cityday_curated":      "reservoir p20 twoRef",
     "adaptive_reservoir_p20_noBoot_cityday_curated":      "reservoir p20 noBoot",
+    # matched-memory (m1500)
+    "adaptive_window_p20_m1500_cityday_curated":          "window p20 (m1500)",
+    "adaptive_window_p20_twoRef_m1500_cityday_curated":   "window p20 twoRef (m1500)",
+    "adaptive_reservoir_p20_m1500_cityday_curated":       "reservoir p20 (m1500)",
+    "adaptive_reservoir_p20_twoRef_m1500_cityday_curated":
+                                                          "reservoir p20 twoRef (m1500)",
     # temporal
     "no_filter_cityday_temporal":                         "none (T)",
     "random_p21_cityday_temporal":                        "random p21 (T)",
@@ -129,9 +145,56 @@ VARIANT_LABEL: Dict[str, str] = {
 }
 
 
+# Print-friendly variant labels (used by ``label_for``).  Memory-size
+# suffixes (``m1500``) are stripped because the body text introduces the
+# per-client memory budget once; the ``twoRef`` policy is spelled out
+# as ``two-ref``; ``(T)`` is expanded to "(temporal)" so casual readers
+# can decode it without consulting the legend.
+THESIS_LABEL: Dict[str, str] = {
+    "no_filter_cityday_curated":                          "No filter",
+    "random_p17_cityday_curated":                         r"Random ($\rho{=}0.17$)",
+    "random_p21_cityday_curated":                         r"Random ($\rho{=}0.21$)",
+    "random_p23_cityday_curated":                         r"Random ($\rho{=}0.23$)",
+    "random_p26_cityday_curated":                         r"Random ($\rho{=}0.26$)",
+    "random_p27_cityday_curated":                         r"Random ($\rho{=}0.27$)",
+    "random_p29_cityday_curated":                         r"Random ($\rho{=}0.29$)",
+    "random_p33_cityday_curated":                         r"Random ($\rho{=}0.33$)",
+    "random_p73_cityday_curated":                         r"Random ($\rho{=}0.73$)",
+    "random_p77_cityday_curated":                         r"Random ($\rho{=}0.77$)",
+    "static_p15_cityday_curated":                         r"Static ($\tau_{15}$)",
+    "static_p20_cityday_curated":                         r"Static ($\tau_{20}$)",
+    "adaptive_window_p15_cityday_curated":                "Window single-ref ($\\tau_{15}$)",
+    "adaptive_window_p20_cityday_curated":                "Window single-ref",
+    "adaptive_window_p20_twoRef_cityday_curated":         "Window two-ref",
+    "adaptive_window_p20_noBoot_cityday_curated":         "Window (no anchor)",
+    "adaptive_reservoir_p15_cityday_curated":             "Reservoir single-ref ($\\tau_{15}$)",
+    "adaptive_reservoir_p20_cityday_curated":             "Reservoir single-ref",
+    "adaptive_reservoir_p20_twoRef_cityday_curated":      "Reservoir two-ref",
+    "adaptive_reservoir_p20_noBoot_cityday_curated":      "Reservoir (no anchor)",
+    "adaptive_window_p20_m1500_cityday_curated":          "Window single-ref",
+    "adaptive_window_p20_twoRef_m1500_cityday_curated":   "Window two-ref",
+    "adaptive_reservoir_p20_m1500_cityday_curated":       "Reservoir single-ref",
+    "adaptive_reservoir_p20_twoRef_m1500_cityday_curated":"Reservoir two-ref",
+    "no_filter_cityday_temporal":                         "No filter (temporal)",
+    "random_p21_cityday_temporal":                        r"Random ($\rho{=}0.21$, temporal)",
+    "random_p28_cityday_temporal":                        r"Random ($\rho{=}0.28$, temporal)",
+    "random_p31_cityday_temporal":                        r"Random ($\rho{=}0.31$, temporal)",
+    "adaptive_window_p20_cityday_temporal":               "Window single-ref (temporal)",
+    "adaptive_window_p20_twoRef_cityday_temporal":        "Window two-ref (temporal)",
+    "adaptive_reservoir_p20_cityday_temporal":            "Reservoir single-ref (temporal)",
+    "adaptive_reservoir_p20_twoRef_cityday_temporal":     "Reservoir two-ref (temporal)",
+}
+
+
 def label_for(variant: str) -> str:
-    """Return the canonical short label for a variant (fallback: variant)."""
-    return VARIANT_LABEL.get(variant, variant)
+    """Canonical print-friendly label for a variant (used in tables and figures).
+
+    Looks up `THESIS_LABEL` first, falls back to the original
+    notebook-style entry in `VARIANT_LABEL`, and finally to the variant
+    string itself.  Used everywhere -- table column headers, plot
+    legends, scatter annotations.
+    """
+    return THESIS_LABEL.get(variant, VARIANT_LABEL.get(variant, variant))
 
 
 def manifest_for_variant(variant: str) -> str:
@@ -167,9 +230,10 @@ def family_for_variant(variant: str, project_root: Optional[Path] = None) -> str
 VARIANT_FAMILY: Dict[str, str] = {}  # populated by prime_registry().
 
 
-# Iso-accept pairings used in the round-4 closure section.  Each tuple is
-# (filter_variant, random_variant); these are the cleanest cross-variant
-# comparisons the streaming write-up uses.
+# Iso-accept pairings used in the streaming write-up.  Each tuple is
+# (filter_variant, random_variant) where the random partner's
+# ``accept_fraction`` is sized to match the filter's empirical accept
+# rate (gap typically < 0.03).
 ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
     ("static_p15_cityday_curated",                       "random_p73_cityday_curated"),
     ("static_p20_cityday_curated",                       "random_p77_cityday_curated"),
@@ -181,6 +245,15 @@ ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
     ("adaptive_reservoir_p20_cityday_curated",           "random_p21_cityday_curated"),
     ("adaptive_reservoir_p20_twoRef_cityday_curated",    "random_p21_cityday_curated"),
     ("adaptive_reservoir_p20_noBoot_cityday_curated",    "random_p17_cityday_curated"),
+    # Matched-memory variants (m1500) - empirical accept rates landed at
+    # window 0.260 / window twoRef 0.270 / reservoir 0.233 / reservoir twoRef
+    # 0.210, so we pair against the closest existing random.  random_p26 was
+    # added (3 seeds) to give the window m1500 single-ref filter a tighter
+    # iso-accept partner than random_p29 (gap 0.029 -> 0.000).
+    ("adaptive_window_p20_m1500_cityday_curated",        "random_p26_cityday_curated"),
+    ("adaptive_window_p20_twoRef_m1500_cityday_curated", "random_p29_cityday_curated"),
+    ("adaptive_reservoir_p20_m1500_cityday_curated",     "random_p21_cityday_curated"),
+    ("adaptive_reservoir_p20_twoRef_m1500_cityday_curated", "random_p21_cityday_curated"),
     ("adaptive_window_p20_cityday_temporal",             "random_p28_cityday_temporal"),
     ("adaptive_window_p20_twoRef_cityday_temporal",      "random_p31_cityday_temporal"),
     ("adaptive_reservoir_p20_cityday_temporal",          "random_p21_cityday_temporal"),
@@ -216,6 +289,17 @@ ABLATION_PAIRINGS: Dict[str, List[Tuple[str, str, str]]] = {
         ("p20",
          "static_p20_cityday_curated",
          "adaptive_window_p20_twoRef_cityday_curated"),
+    ],
+    # Window vs reservoir at MATCHED memory budget (1500), to decouple
+    # the algorithm from the memory size.  Streaming defaults
+    # historically used window=1000 / reservoir=2000.
+    "matched_memory": [
+        ("Win vs Res  p20  (m1500)",
+         "adaptive_window_p20_m1500_cityday_curated",
+         "adaptive_reservoir_p20_m1500_cityday_curated"),
+        ("Win vs Res  p20 twoRef  (m1500)",
+         "adaptive_window_p20_twoRef_m1500_cityday_curated",
+         "adaptive_reservoir_p20_twoRef_m1500_cityday_curated"),
     ],
 }
 
@@ -619,9 +703,12 @@ def per_domain_trajectory(
     project_root: Optional[Path] = None,
     seeds: Sequence[int] = (42, 43, 44),
 ) -> pd.DataFrame:
-    """Tidy long-format trajectory of per-block mAP (mean over seeds).
+    """Tidy long-format per-block mAP trajectory aggregated over seeds.
 
-    Columns: ``checkpoint_idx, items_processed, optimizer_steps, bucket, mAP``.
+    Columns: ``checkpoint_idx, items_processed, optimizer_steps, bucket,
+    mAP, mAP_std, n``.  ``mAP`` is the cross-seed mean and ``mAP_std``
+    the cross-seed sample standard deviation (NaN if only one seed
+    contributed at that checkpoint); ``n`` is the seed count.
     """
     sd = variant_seed_dirs(variant, seeds=seeds, project_root=project_root)
     parts = []
@@ -641,7 +728,9 @@ def per_domain_trajectory(
     group_cols = [c for c in
                   ("checkpoint_idx", "items_processed", "optimizer_steps", "bucket")
                   if c in cat.columns]
-    return cat.groupby(group_cols, as_index=False)["mAP"].mean()
+    return cat.groupby(group_cols, as_index=False)["mAP"].agg(
+        mAP="mean", mAP_std="std", n="count"
+    )
 
 
 def mAP_trajectory(
@@ -757,21 +846,40 @@ def stream_composition(
     fields: Sequence[str] = ("time_of_day", "road_condition"),
     window: int = 1000,
     field_orders: Optional[Mapping[str, Sequence[str]]] = None,
+    field_derivers: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Per-window stacked-area composition of the post-bootstrap stream.
 
-    For each ``field`` in ``fields``, build a wide-format DataFrame whose
-    index is ``items_start`` (window left edge) and columns are the
-    field's values, holding the *fraction* of frames in that window with
-    each value.  Use ``field_orders`` to fix the column ordering (which
-    drives stacked-area layering).  Missing values are dropped.
+    For each ``field`` in ``fields``, build a wide-format DataFrame
+    whose index is ``items_start`` (window left edge) and columns are
+    the field's values, holding the *fraction* of frames in that
+    window with each value.
+
+    Args:
+        fields: per-frame metadata field names to summarise.  Each is
+            looked up directly with ``frame.get(field)`` unless a
+            matching entry in ``field_derivers`` is provided.
+        field_orders: ``{field: ordered_categories}`` -- pins the column
+            ordering (which drives the stacked-area layering).
+        field_derivers: optional ``{field: callable(frame) -> str}``
+            map for computed fields (e.g. a 5-bucket ``weather``
+            derived from ``scraped_weather`` + ``road_condition``).
+            Takes precedence over the raw lookup for that field.
+
+    Missing values are dropped before summarising.
     """
     train = [f for f in manifest.get("frames", []) if f.get("split") == "train"]
     stream_frames = train[int(bootstrap_frames):]
+    derivers = dict(field_derivers or {})
+
+    def _value(field: str, frame: Mapping):
+        deriver = derivers.get(field)
+        return deriver(frame) if deriver is not None else frame.get(field)
+
     base = pd.DataFrame({
         "global_idx": range(len(stream_frames)),
         **{
-            field: [f.get(field) for f in stream_frames]
+            field: [_value(field, f) for f in stream_frames]
             for field in fields
         },
     })

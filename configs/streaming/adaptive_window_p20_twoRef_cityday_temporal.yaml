@@ -1,11 +1,12 @@
-# No filter baseline: city-day bootstrap, road_type ordering (city-first)
-# Bootstrap: 5k city+day frames (shared prefix in manifest)
-# Stream: city → arterial-urban → highway → arterial-rural → smaller-rural
+# Adaptive distribution filter -- sliding-window mode + two-reference
+# Mahalanobis -- city-day bootstrap, temporal stream ordering.  Pairs
+# with adaptive_window_p20_cityday_temporal at the same percentile so we
+# can attribute the multimodal-fit fix to the reference structure under
+# the chronological stream.
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/streaming/no_filter_cityday_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
+output_dir: "outputs/streaming/adaptive_window_p20_twoRef_cityday_temporal"
 
-# Model / classes
 num_classes: 11
 target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
@@ -15,14 +16,12 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Bootstrap phase
 bootstrap_run_dir: null
-bootstrap_frames: 5000
+bootstrap_frames: 2000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
-# Streaming phase
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
@@ -33,19 +32,23 @@ local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
-# Streaming LR schedule (linear warmup + cosine decay)
 streaming_lr_warmup_items: 1000
 streaming_lr_min_factor: 0.1
 
-# Augmentation
 augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering
-filter_policy: "none"
+filter_policy: "distribution"
+accept_fraction: 0.20
+threshold_percentile: 0.20
 
-# Evaluation
+scoring_refresh_every_flushes: 50
+scoring_refresh_window_size: 1000
+scoring_refresh_reservoir_size: 0
+scoring_refresh_batch_size: 16
+scoring_reference_mode: "two_reference"
+
 eval_every_n_items: 5000
 checkpoint_interval: 1000
 score_threshold: 0.3
@@ -55,10 +58,8 @@ bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005
 bootstrap_fail_on_smoke_check: true
 
-# DataLoader
 num_workers: 8
 use_amp: true
 
-# Reproducibility
 seed: 42
 device: "cuda"

@@ -1,10 +1,10 @@
-# Federated: distribution threshold with city-day bootstrap, road_type ordering
-# Domain-aligned partitioning: Client 0 = city, Client 1 = arterial-urban, Client 2 = highway, Client 3 = rural
+# Federated adaptive Reservoir filter (single reference) at threshold
+# percentile 0.20 on the city-day curated stream.  Refresh every round
+# from a uniform random sample of all past fleet-pooled accepts.
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_road_type.json"
-output_dir: "outputs/federated/fed_dist_thresh_cityday_road_type_p10"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
+output_dir: "outputs/federated/fed_adaptive_reservoir_p10_cityday_curated"
 
-# Model / classes
 num_classes: 11
 target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
@@ -14,25 +14,22 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Shared bootstrap
 bootstrap_run_dir: null
-bootstrap_frames: 5000
+bootstrap_frames: 2000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
-# Federated setup
 num_clients: 4
-num_rounds: 20
-local_items_per_round: 2000
+num_rounds: 30
+local_items_per_round: 1000
 partition_strategy: "domain_aligned"
 domain_client_groups:
-  - ["city"]
-  - ["arterial-urban"]
-  - ["highway"]
-  - ["arterial-rural", "smaller-rural"]
+  - ["city_day_cloudy", "city_day_clear"]
+  - ["city_day_rain_wet", "city_day_snow", "city_twilight", "city_night"]
+  - ["arterial-urban_day", "arterial-urban_twi-night"]
+  - ["highway_day", "highway_twi-night", "arterial-rural_day", "arterial-rural_twi-night", "smaller-rural_all"]
 
-# Local streaming training
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
@@ -43,24 +40,21 @@ local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
-# Augmentation
 augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: distribution-based, frozen-reference threshold
 filter_policy: "distribution"
-budget_mode: "fixed_threshold"
+accept_fraction: 0.10
 threshold_percentile: 0.10
-threshold_ema_alpha: 0.0
-warmup_items: 500
-score_window_size: 500
-distribution_mode: "mahalanobis"
-embedding_buffer_size: 1000
-knn_k: 10
-update_distribution_stats: false
 
-# Evaluation
+scoring_refresh_every_rounds: 1
+scoring_refresh_window_size: 0
+scoring_refresh_reservoir_size: 1500
+scoring_refresh_batch_size: 16
+scoring_reference_mode: "single"
+scoring_include_bootstrap: true
+
 eval_every_n_rounds: 1
 score_threshold: 0.3
 min_box_area: 64.0
@@ -70,10 +64,8 @@ bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005
 bootstrap_fail_on_smoke_check: true
 
-# DataLoader
 num_workers: 8
 use_amp: true
 
-# Reproducibility
 seed: 42
 device: "cuda"

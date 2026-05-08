@@ -67,65 +67,195 @@ from . import runs as ah
 # Variant registry
 # =============================================================================
 
-# Ordered list of variants featured in the federated write-up.  The
+# Ordered list of variants featured in the federated write-up.  Grouped
+# by the chapter's 2 x 2 design: schedule (default vs heavy-local) crossed
+# with partition (curated domain-aligned vs temporal time-aligned).  The
 # order is also the row order for tables and the legend order for
-# figures.  Mirrors the streaming registry but for the federated grid.
+# figures.
 FEATURED_VARIANTS: List[str] = [
-    # Phase 1A - filter grid on cityday_curated (default schedule)
+    # ----- Default schedule, curated partition (headline cell) -----
+    # Reference baselines.
     "fed_no_filter_cityday_curated",
     "fed_static_p20_cityday_curated",
+    # Filter grid: window / reservoir x single-ref / two-ref x p10..p20.
+    "fed_adaptive_window_p10_cityday_curated",
     "fed_adaptive_window_p20_cityday_curated",
     "fed_adaptive_window_p20_twoRef_cityday_curated",
+    "fed_adaptive_reservoir_p10_cityday_curated",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated",
     "fed_adaptive_reservoir_p20_cityday_curated",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
-    # Phase 1B - iso-accept random partners
+    # Iso-accept random partners (matched to the empirical filter accepts).
+    "fed_random_p7_cityday_curated",
+    "fed_random_p11_cityday_curated",
     "fed_random_p12_cityday_curated",
     "fed_random_p15_cityday_curated",
     "fed_random_p18_cityday_curated",
+    "fed_random_p26_cityday_curated",
     "fed_random_p77_cityday_curated",
-    # Phase 2 Y - tighter accept ablation
-    "fed_adaptive_window_p10_cityday_curated",
-    "fed_adaptive_reservoir_p10_cityday_curated",
-    "fed_adaptive_reservoir_p10_twoRef_cityday_curated",
-    # Phase 2 Z - heavier local schedule
+    # Refresh-density diagnostic: default schedule but
+    # scoring_refresh_every_rounds=3 (vs every round) -- inflates the
+    # accept rate at the same threshold-percentile and decomposes the
+    # refresh-cadence effect from the local-training-intensity effect.
+    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated",
+
+    # ----- Default schedule, temporal partition -----
+    "fed_no_filter_cityday_temporal",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal",
+    "fed_random_p15_cityday_temporal",
+    "fed_random_p19_cityday_temporal",
+
+    # ----- Heavy-local schedule, curated partition (stress-test cell) -----
+    # 10 rounds x 3000 items per client (vs default 30 x 1000) -- same
+    # total budget, 3x fewer aggregations, 3x heavier per-round local work.
     "fed_no_filter_cityday_curated_heavyLocal",
+    "fed_adaptive_window_p20_cityday_curated_heavyLocal",
+    "fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal",
+    "fed_adaptive_reservoir_p15_cityday_curated_heavyLocal",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal",
     "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal",
-    "fed_random_p15_cityday_curated_heavyLocal",
-    "fed_random_p18_cityday_curated_heavyLocal",
+    "fed_random_p16_cityday_curated_heavyLocal",
+    "fed_random_p21_cityday_curated_heavyLocal",
+    "fed_random_p26_cityday_curated_heavyLocal",
+
+    # ----- Heavy-local schedule, temporal partition (recovery cell) -----
+    "fed_no_filter_cityday_temporal_heavyLocal",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal",
+    "fed_random_p20_cityday_temporal_heavyLocal",
+    "fed_random_p25_cityday_temporal_heavyLocal",
+    "fed_random_p30_cityday_temporal_heavyLocal",
 ]
 
 # Short display labels.  Missing entries fall back to the variant name.
+# "(HL)" tags the heavy-local schedule; "(T)" tags the temporal manifest.
 VARIANT_LABEL: Dict[str, str] = {
-    # Phase 1A
+    # ----- Default + curated -----
     "fed_no_filter_cityday_curated":                              "none",
     "fed_static_p20_cityday_curated":                             "static p20",
+    "fed_adaptive_window_p10_cityday_curated":                    "window p10",
     "fed_adaptive_window_p20_cityday_curated":                    "window p20",
     "fed_adaptive_window_p20_twoRef_cityday_curated":             "window p20 twoRef",
+    "fed_adaptive_reservoir_p10_cityday_curated":                 "reservoir p10",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated":          "reservoir p10 twoRef",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated":          "reservoir p15 twoRef",
     "fed_adaptive_reservoir_p20_cityday_curated":                 "reservoir p20",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated":          "reservoir p20 twoRef",
-    # Phase 1B
+    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated":
+                                                                  "reservoir p20 twoRef (sparse refresh)",
+    "fed_random_p7_cityday_curated":                              "random p7",
+    "fed_random_p11_cityday_curated":                             "random p11",
     "fed_random_p12_cityday_curated":                             "random p12",
     "fed_random_p15_cityday_curated":                             "random p15",
     "fed_random_p18_cityday_curated":                             "random p18",
+    "fed_random_p26_cityday_curated":                             "random p26",
     "fed_random_p77_cityday_curated":                             "random p77",
-    # Phase 2 Y
-    "fed_adaptive_window_p10_cityday_curated":                    "window p10",
-    "fed_adaptive_reservoir_p10_cityday_curated":                 "reservoir p10",
-    "fed_adaptive_reservoir_p10_twoRef_cityday_curated":          "reservoir p10 twoRef",
-    # Phase 2 Z (heavyLocal)
+    # ----- Default + temporal -----
+    "fed_no_filter_cityday_temporal":                             "none (T)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal":         "reservoir p15 twoRef (T)",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal":         "reservoir p20 twoRef (T)",
+    "fed_random_p15_cityday_temporal":                            "random p15 (T)",
+    "fed_random_p19_cityday_temporal":                            "random p19 (T)",
+    # ----- Heavy-local + curated -----
     "fed_no_filter_cityday_curated_heavyLocal":                   "none (HL)",
+    "fed_adaptive_window_p20_cityday_curated_heavyLocal":         "window p20 (HL)",
+    "fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal":  "window p20 twoRef (HL)",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal":
+                                                                  "reservoir p10 twoRef (HL)",
+    "fed_adaptive_reservoir_p15_cityday_curated_heavyLocal":      "reservoir p15 (HL)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal":
+                                                                  "reservoir p15 twoRef (HL)",
     "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal":      "reservoir p20 (HL)",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal":
                                                                   "reservoir p20 twoRef (HL)",
-    "fed_random_p15_cityday_curated_heavyLocal":                  "random p15 (HL)",
-    "fed_random_p18_cityday_curated_heavyLocal":                  "random p18 (HL)",
+    "fed_random_p16_cityday_curated_heavyLocal":                  "random p16 (HL)",
+    "fed_random_p21_cityday_curated_heavyLocal":                  "random p21 (HL)",
+    "fed_random_p26_cityday_curated_heavyLocal":                  "random p26 (HL)",
+    # ----- Heavy-local + temporal -----
+    "fed_no_filter_cityday_temporal_heavyLocal":                  "none (T, HL)",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal":
+                                                                  "reservoir p10 twoRef (T, HL)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal":
+                                                                  "reservoir p15 twoRef (T, HL)",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal":
+                                                                  "reservoir p20 twoRef (T, HL)",
+    "fed_random_p20_cityday_temporal_heavyLocal":                 "random p20 (T, HL)",
+    "fed_random_p25_cityday_temporal_heavyLocal":                 "random p25 (T, HL)",
+    "fed_random_p30_cityday_temporal_heavyLocal":                 "random p30 (T, HL)",
+}
+
+
+# Print-friendly variant labels (used by ``label_for``).  ``(HL)``
+# becomes "(heavy-local)"; ``(T)`` becomes "(temporal)"; ``twoRef`` is
+# spelled out as "two-ref"; the threshold percentile is rendered as
+# ``\rho`` when it is the random baseline's accept fraction and as
+# ``\tau`` when it is the filter's threshold percentile.
+THESIS_LABEL: Dict[str, str] = {
+    "fed_no_filter_cityday_curated":                              "No filter",
+    "fed_static_p20_cityday_curated":                             r"Static ($\tau_{20}$)",
+    "fed_adaptive_window_p10_cityday_curated":                    "Window single-ref ($\\tau_{10}$)",
+    "fed_adaptive_window_p20_cityday_curated":                    "Window single-ref",
+    "fed_adaptive_window_p20_twoRef_cityday_curated":             "Window two-ref",
+    "fed_adaptive_reservoir_p10_cityday_curated":                 "Reservoir single-ref ($\\tau_{10}$)",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated":          "Reservoir two-ref ($\\tau_{10}$)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated":          "Reservoir two-ref ($\\tau_{15}$)",
+    "fed_adaptive_reservoir_p20_cityday_curated":                 "Reservoir single-ref",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_curated":          "Reservoir two-ref",
+    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated":
+                                                                  "Reservoir two-ref (sparse refresh)",
+    "fed_random_p7_cityday_curated":                              r"Random ($\rho{=}0.07$)",
+    "fed_random_p11_cityday_curated":                             r"Random ($\rho{=}0.11$)",
+    "fed_random_p12_cityday_curated":                             r"Random ($\rho{=}0.12$)",
+    "fed_random_p15_cityday_curated":                             r"Random ($\rho{=}0.15$)",
+    "fed_random_p18_cityday_curated":                             r"Random ($\rho{=}0.18$)",
+    "fed_random_p26_cityday_curated":                             r"Random ($\rho{=}0.26$)",
+    "fed_random_p77_cityday_curated":                             r"Random ($\rho{=}0.77$)",
+    "fed_no_filter_cityday_temporal":                             "No filter (temporal)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal":         "Reservoir two-ref (temporal, $\\tau_{15}$)",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal":         "Reservoir two-ref (temporal)",
+    "fed_random_p15_cityday_temporal":                            r"Random ($\rho{=}0.15$, temporal)",
+    "fed_random_p19_cityday_temporal":                            r"Random ($\rho{=}0.19$, temporal)",
+    "fed_no_filter_cityday_curated_heavyLocal":                   "No filter (heavy-local)",
+    "fed_adaptive_window_p20_cityday_curated_heavyLocal":         "Window single-ref (heavy-local)",
+    "fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal":  "Window two-ref (heavy-local)",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal":
+                                                                  "Reservoir two-ref (heavy-local, $\\tau_{10}$)",
+    "fed_adaptive_reservoir_p15_cityday_curated_heavyLocal":      "Reservoir single-ref (heavy-local, $\\tau_{15}$)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal":
+                                                                  "Reservoir two-ref (heavy-local, $\\tau_{15}$)",
+    "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal":      "Reservoir single-ref (heavy-local)",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal":
+                                                                  "Reservoir two-ref (heavy-local)",
+    "fed_random_p16_cityday_curated_heavyLocal":                  r"Random ($\rho{=}0.16$, heavy-local)",
+    "fed_random_p21_cityday_curated_heavyLocal":                  r"Random ($\rho{=}0.21$, heavy-local)",
+    "fed_random_p26_cityday_curated_heavyLocal":                  r"Random ($\rho{=}0.26$, heavy-local)",
+    "fed_no_filter_cityday_temporal_heavyLocal":                  "No filter (temporal, heavy-local)",
+    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal":
+                                                                  "Reservoir two-ref (temporal, heavy-local, $\\tau_{10}$)",
+    "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal":
+                                                                  "Reservoir two-ref (temporal, heavy-local, $\\tau_{15}$)",
+    "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal":
+                                                                  "Reservoir two-ref (temporal, heavy-local)",
+    "fed_random_p20_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.20$, temporal, heavy-local)",
+    "fed_random_p25_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.25$, temporal, heavy-local)",
+    "fed_random_p30_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.30$, temporal, heavy-local)",
 }
 
 
 def label_for(variant: str) -> str:
-    """Canonical short label for a variant (fallback: variant)."""
-    return VARIANT_LABEL.get(variant, variant)
+    """Canonical print-friendly label for a variant (used in tables and figures).
+
+    Looks up `THESIS_LABEL` first, falls back to the original
+    notebook-style entry in `VARIANT_LABEL`, and finally to the variant
+    string itself.  Used everywhere -- table column headers, plot
+    legends, scatter annotations.
+    """
+    return THESIS_LABEL.get(variant, VARIANT_LABEL.get(variant, variant))
 
 
 def manifest_for_variant(variant: str) -> str:
@@ -138,7 +268,7 @@ def manifest_for_variant(variant: str) -> str:
 
 
 def schedule_for_variant(variant: str) -> str:
-    """Return ``"heavyLocal"`` for Phase Z variants, else ``"default"``."""
+    """Return ``"heavyLocal"`` for heavy-local-schedule variants, else ``"default"``."""
     return "heavyLocal" if variant.endswith("_heavyLocal") else "default"
 
 
@@ -169,65 +299,156 @@ VARIANT_FAMILY: Dict[str, str] = {}
 # Iso-accept and ablation pairings
 # =============================================================================
 
-# Iso-accept pairings used in the federated write-up.  Each tuple is
-# ``(filter_variant, random_variant)``.  Random fractions were chosen
-# to match the empirical Phase 1A accept rates.
+# Iso-accept pairings: ``(filter_variant, random_variant)`` with the
+# random partner's accept_fraction picked to match the filter's empirical
+# accept rate (gap typically < 0.01).  Grouped by the chapter's 2 x 2
+# design (default / heavy-local x curated / temporal).
 ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
-    # Phase 1A vs Phase 1B
-    ("fed_static_p20_cityday_curated",                            "fed_random_p77_cityday_curated"),
-    ("fed_adaptive_window_p20_cityday_curated",                   "fed_random_p12_cityday_curated"),
-    ("fed_adaptive_window_p20_twoRef_cityday_curated",            "fed_random_p12_cityday_curated"),
-    ("fed_adaptive_reservoir_p20_cityday_curated",                "fed_random_p18_cityday_curated"),
-    ("fed_adaptive_reservoir_p20_twoRef_cityday_curated",         "fed_random_p15_cityday_curated"),
-    # Phase 2 Z (heavyLocal) - random partners shown if they exist
+    # ----- Default schedule, curated partition -----
+    ("fed_static_p20_cityday_curated",                             "fed_random_p77_cityday_curated"),
+    ("fed_adaptive_window_p10_cityday_curated",                    "fed_random_p7_cityday_curated"),
+    ("fed_adaptive_window_p20_cityday_curated",                    "fed_random_p12_cityday_curated"),
+    ("fed_adaptive_window_p20_twoRef_cityday_curated",             "fed_random_p12_cityday_curated"),
+    ("fed_adaptive_reservoir_p10_cityday_curated",                 "fed_random_p7_cityday_curated"),
+    ("fed_adaptive_reservoir_p10_twoRef_cityday_curated",          "fed_random_p7_cityday_curated"),
+    ("fed_adaptive_reservoir_p15_twoRef_cityday_curated",          "fed_random_p11_cityday_curated"),
+    ("fed_adaptive_reservoir_p20_cityday_curated",                 "fed_random_p18_cityday_curated"),
+    ("fed_adaptive_reservoir_p20_twoRef_cityday_curated",          "fed_random_p15_cityday_curated"),
+    # The sparse-refresh variant inflates accept to ~0.26 at the same
+    # threshold percentile; pair it against random_p26 (default schedule).
+    ("fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated",
+     "fed_random_p26_cityday_curated"),
+
+    # ----- Default schedule, temporal partition -----
+    ("fed_adaptive_reservoir_p15_twoRef_cityday_temporal",         "fed_random_p15_cityday_temporal"),
+    ("fed_adaptive_reservoir_p20_twoRef_cityday_temporal",         "fed_random_p19_cityday_temporal"),
+
+    # ----- Heavy-local schedule, curated partition -----
+    ("fed_adaptive_window_p20_cityday_curated_heavyLocal",
+     "fed_random_p26_cityday_curated_heavyLocal"),
+    ("fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal",
+     "fed_random_p26_cityday_curated_heavyLocal"),
+    ("fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal",
+     "fed_random_p16_cityday_curated_heavyLocal"),
+    ("fed_adaptive_reservoir_p15_cityday_curated_heavyLocal",
+     "fed_random_p21_cityday_curated_heavyLocal"),
+    ("fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal",
+     "fed_random_p21_cityday_curated_heavyLocal"),
     ("fed_adaptive_reservoir_p20_cityday_curated_heavyLocal",
-     "fed_random_p18_cityday_curated_heavyLocal"),
+     "fed_random_p26_cityday_curated_heavyLocal"),
     ("fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal",
-     "fed_random_p15_cityday_curated_heavyLocal"),
+     "fed_random_p26_cityday_curated_heavyLocal"),
+
+    # ----- Heavy-local schedule, temporal partition -----
+    ("fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal",
+     "fed_random_p20_cityday_temporal_heavyLocal"),
+    ("fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal",
+     "fed_random_p25_cityday_temporal_heavyLocal"),
+    ("fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal",
+     "fed_random_p30_cityday_temporal_heavyLocal"),
 ]
 
 # Ablation pairings: ``(label, baseline_variant, ablated_variant)``.
+# delta_smoothed in `ablation_pair_table` reads as
+# ``ablated mAP - baseline mAP`` (i.e. positive => the ablation helps).
 ABLATION_PAIRINGS: Dict[str, List[Tuple[str, str, str]]] = {
+    # Adding the bootstrap Gaussian alongside the adaptive Gaussian
+    # (two-reference Mahalanobis).  Stabilises the threshold against
+    # reference-set drift; helps window more than reservoir.
     "twoRef": [
-        ("Win_p20",
+        ("Window",
          "fed_adaptive_window_p20_cityday_curated",
          "fed_adaptive_window_p20_twoRef_cityday_curated"),
-        ("Res_p20",
+        ("Reservoir",
          "fed_adaptive_reservoir_p20_cityday_curated",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated"),
-        ("Res_p10",
+        (r"Reservoir ($\tau_{10}$)",
          "fed_adaptive_reservoir_p10_cityday_curated",
          "fed_adaptive_reservoir_p10_twoRef_cityday_curated"),
-        ("Res_p20  (HL)",
+        ("Window\n(heavy-local)",
+         "fed_adaptive_window_p20_cityday_curated_heavyLocal",
+         "fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal"),
+        ("Reservoir\n(heavy-local)",
          "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal"),
+        (r"Reservoir ($\tau_{15}$)" + "\n(heavy-local)",
+         "fed_adaptive_reservoir_p15_cityday_curated_heavyLocal",
+         "fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal"),
     ],
+    # Tighter accept (lower threshold percentile).  Tests whether the
+    # filter does better with a smaller, more selective label budget.
     "tighter_accept": [
-        ("Win  p20 -> p10",
+        (r"Window: $\tau_{20}{\to}\tau_{10}$",
          "fed_adaptive_window_p20_cityday_curated",
          "fed_adaptive_window_p10_cityday_curated"),
-        ("Res  p20 -> p10",
+        (r"Reservoir: $\tau_{20}{\to}\tau_{10}$",
          "fed_adaptive_reservoir_p20_cityday_curated",
          "fed_adaptive_reservoir_p10_cityday_curated"),
-        ("Res  p20 -> p10  (twoRef)",
+        (r"Reservoir two-ref: $\tau_{20}{\to}\tau_{10}$",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
          "fed_adaptive_reservoir_p10_twoRef_cityday_curated"),
+        (r"Reservoir: $\tau_{20}{\to}\tau_{15}$" + "\n(heavy-local)",
+         "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal",
+         "fed_adaptive_reservoir_p15_cityday_curated_heavyLocal"),
+        (r"Reservoir two-ref: $\tau_{20}{\to}\tau_{15}$" + "\n(heavy-local)",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal",
+         "fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal"),
+        (r"Reservoir two-ref: $\tau_{20}{\to}\tau_{10}$" + "\n(heavy-local)",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal",
+         "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal"),
     ],
+    # Heavy-local schedule: 10 rounds x 3000 items (vs default 30 x 1000).
+    # Same total budget, 3x fewer aggregations, 3x heavier per-round
+    # local work.  Holding accept budget constant within each pair.
     "heavyLocal": [
-        ("none",
+        ("No filter",
          "fed_no_filter_cityday_curated",
          "fed_no_filter_cityday_curated_heavyLocal"),
-        ("Res_p20",
+        ("Window",
+         "fed_adaptive_window_p20_cityday_curated",
+         "fed_adaptive_window_p20_cityday_curated_heavyLocal"),
+        ("Window\ntwo-ref",
+         "fed_adaptive_window_p20_twoRef_cityday_curated",
+         "fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal"),
+        ("Reservoir",
          "fed_adaptive_reservoir_p20_cityday_curated",
          "fed_adaptive_reservoir_p20_cityday_curated_heavyLocal"),
-        ("Res_p20  twoRef",
+        ("Reservoir\ntwo-ref",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal"),
+        (r"Reservoir ($\tau_{10}$)" + "\ntwo-ref",
+         "fed_adaptive_reservoir_p10_twoRef_cityday_curated",
+         "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal"),
     ],
+    # Sparse-refresh diagnostic: same default schedule (30 rounds x 1000
+    # items) but the scoring reference is refit only every 3 rounds
+    # (vs every round).  Inflates the accept rate at the same threshold
+    # percentile, which lets us decompose the heavy-local effect into
+    # "stale reference" vs "intense per-round local training".
+    "sparse_refresh": [
+        ("Reservoir two-ref",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
+         "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated"),
+    ],
+    # Adaptive (refreshed reference) vs static (bootstrap-only) on the
+    # headline curated cell.
     "static_vs_adaptive": [
-        ("p20  (curated)",
+        ("Reservoir two-ref vs static",
          "fed_static_p20_cityday_curated",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated"),
+    ],
+    # Manifest replication: does the headline finding (default + curated)
+    # reproduce on the temporal stream order?
+    "temporal_replication": [
+        (r"Reservoir two-ref ($\tau_{15}$)",
+         "fed_adaptive_reservoir_p15_twoRef_cityday_curated",
+         "fed_adaptive_reservoir_p15_twoRef_cityday_temporal"),
+        ("Reservoir two-ref",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_temporal"),
+        ("Reservoir two-ref\n(heavy-local)",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_curated_heavyLocal",
+         "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal"),
     ],
 }
 
@@ -244,6 +465,23 @@ CLIENT_LABEL: Dict[int, str] = {
     2: "C2 urban_arterial",
     3: "C3 out_of_city",
 }
+
+# Display labels for the four `contiguous` clients used on the temporal
+# manifest.  The contiguous strategy gives each client one chronological
+# quartile of the post-bootstrap stream.
+TEMPORAL_CLIENT_LABEL: Dict[int, str] = {
+    0: "C0 Q1 (early, familiar-heavy)",
+    1: "C1 Q2 (twi-night appears)",
+    2: "C2 Q3 (rain + rural emerges)",
+    3: "C3 Q4 (night-heavy, late)",
+}
+
+
+def client_label(variant: str, client: int) -> str:
+    """Pick the right per-client label dict based on the variant's manifest."""
+    if "_temporal" in variant:
+        return TEMPORAL_CLIENT_LABEL.get(client, f"C{client}")
+    return CLIENT_LABEL.get(client, f"C{client}")
 
 
 # Mapping from `stream_block` bucket name to the higher-level grouping

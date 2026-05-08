@@ -58,62 +58,49 @@ from . import heatmap as _heatmap, save_figure  # noqa: F401  (re-export)
 # Style
 # =============================================================================
 
-FAMILY_COLORS: Dict[str, str] = dict(ah.FILTER_FAMILY_COLORS)
-FAMILY_COLORS["random"] = "#7f7f7f"
+# Single-hue-per-family palette.  Family is the only thing color
+# encodes; flavor (single-ref vs two-ref vs no-anchor vs heavy-local)
+# is encoded by linestyle + marker.  This keeps figures readable in
+# greyscale print and removes confusable hues (e.g. olive vs green).
+FAMILY_COLORS: Dict[str, str] = {
+    "none":       "#2ca02c",  # no-filter ceiling -- green
+    "no_filter":  "#2ca02c",  # alias for the no-filter family
+    "random":     "#7f7f7f",  # neutral grey
+    "static":     "#1f77b4",  # blue
+    "window":     "#ff7f0e",  # orange
+    "reservoir":  "#d62728",  # red
+}
 
-# Per-variant color overrides.  Distinct hues are required because the
-# rolling accept-rate plot fills +/-1 std confidence bands at low alpha;
-# two bands sharing a family color become impossible to tell apart.
-# Variants are still loosely grouped by family hue so the legend reads
-# naturally:
-#
-#   - window family    -> warm orange / yellow / tan
-#   - reservoir family -> red / magenta / salmon
-#   - static family    -> light vs dark blue
-#   - random family    -> shades of grey
-#   - no_filter        -> green
-VARIANT_COLOR_PALETTE: Dict[str, str] = {
-    # baselines
-    "no_filter_cityday_curated":                          "#2ca02c",  # green
-    "no_filter_cityday_temporal":                         "#2ca02c",
-    "random_p17_cityday_curated":                         "#c8c8c8",
-    "random_p21_cityday_curated":                         "#a0a0a0",
-    "random_p21_cityday_temporal":                        "#a0a0a0",
-    "random_p28_cityday_temporal":                        "#808080",
-    "random_p29_cityday_curated":                         "#808080",
-    "random_p31_cityday_temporal":                        "#606060",
-    "random_p33_cityday_curated":                         "#606060",
-    "random_p73_cityday_curated":                         "#404040",
-    "random_p77_cityday_curated":                         "#202020",
-    # static — purple vs blue (truly distinct hues, not just light/dark blue)
-    "static_p15_cityday_curated":                         "#9467bd",  # purple
-    "static_p20_cityday_curated":                         "#1f77b4",  # steel blue
-    # window family — orange vs olive (warm, but different hue not just shade)
-    "adaptive_window_p15_cityday_curated":                "#ffbb78",  # light tan
-    "adaptive_window_p20_cityday_curated":                "#ff7f0e",  # vivid orange
-    "adaptive_window_p20_twoRef_cityday_curated":         "#bcbd22",  # olive (tab10)
-    "adaptive_window_p20_noBoot_cityday_curated":         "#8c564b",  # warm brown (tab10)
-    "adaptive_window_p20_cityday_temporal":               "#ff7f0e",
-    "adaptive_window_p20_twoRef_cityday_temporal":        "#bcbd22",
-    # reservoir family — red vs pink (different hue not just shade)
-    "adaptive_reservoir_p15_cityday_curated":             "#fc8d62",  # salmon
-    "adaptive_reservoir_p20_cityday_curated":             "#d62728",  # vivid red
-    "adaptive_reservoir_p20_twoRef_cityday_curated":      "#e377c2",  # pink (tab10)
-    "adaptive_reservoir_p20_noBoot_cityday_curated":      "#8b0000",  # dark red
-    "adaptive_reservoir_p20_cityday_temporal":            "#d62728",
-    "adaptive_reservoir_p20_twoRef_cityday_temporal":     "#e377c2",
+# Random baselines need to be distinguishable when several appear in
+# the same scatter; vary lightness, not hue.  Lower accept fractions
+# get lighter shades.  Falls back to FAMILY_COLORS["random"] for
+# unmapped randoms.
+_RANDOM_GREYSCALE: Dict[str, str] = {
+    "random_p17_cityday_curated":   "#bdbdbd",
+    "random_p21_cityday_curated":   "#a0a0a0",
+    "random_p23_cityday_curated":   "#909090",
+    "random_p26_cityday_curated":   "#7f7f7f",
+    "random_p27_cityday_curated":   "#707070",
+    "random_p29_cityday_curated":   "#606060",
+    "random_p33_cityday_curated":   "#505050",
+    "random_p73_cityday_curated":   "#383838",
+    "random_p77_cityday_curated":   "#202020",
+    "random_p21_cityday_temporal":  "#a0a0a0",
+    "random_p28_cityday_temporal":  "#707070",
+    "random_p31_cityday_temporal":  "#505050",
 }
 
 
 def variant_color(variant: str, *, project_root: Optional[Path] = None) -> str:
-    """Return a stable matplotlib color for a variant.
+    """Return the family-level color for a variant.
 
-    Each *featured* variant in `VARIANT_COLOR_PALETTE` has a hand-picked
-    distinct hue; everything else falls back to the family-level color
-    so unfamiliar variants still render plausibly.
+    All members of a family share the same hue; flavor is conveyed by
+    linestyle + marker.  The exception is the random family, where
+    different accept fractions are drawn in different shades of grey
+    so iso-accept comparisons remain readable on a single axis.
     """
-    if variant in VARIANT_COLOR_PALETTE:
-        return VARIANT_COLOR_PALETTE[variant]
+    if variant in _RANDOM_GREYSCALE:
+        return _RANDOM_GREYSCALE[variant]
     fam = sa.family_for_variant(variant, project_root=project_root)
     return FAMILY_COLORS.get(fam, "#444444")
 
@@ -121,27 +108,35 @@ def variant_color(variant: str, *, project_root: Optional[Path] = None) -> str:
 def variant_linestyle(variant: str) -> str:
     """Return a stable matplotlib linestyle from the variant flavor.
 
-    The color is set by family; the linestyle distinguishes flavors
-    *within* a family.  Convention:
+    Encoding (family-agnostic):
 
-    - twoRef       -> ``--`` (dashed)
-    - noBoot       -> ``:``  (dotted)
-    - p15 budget   -> ``--`` (dashed) when no other flavor applies, so the
-                       "headline" p20 variant remains solid in any plot
-                       that mixes p15 and p20 within a family
-    - otherwise    -> ``-``  (solid)
+    - solid ``-``  : headline / single-reference variants and the
+                     reference baselines (no-filter, random, static
+                     ``\\tau_{20}``).
+    - dashed ``--``: the two-reference Mahalanobis variant.
+    - dotted ``:`` : the bootstrap-only ablation (noBoot).
+    - dashed ``--``: the lower-percentile ``static_p15`` variant when
+                     paired with ``static_p20``.
     """
     if "twoRef" in variant:
         return "--"
     if "noBoot" in variant:
         return ":"
-    if "_p15_" in variant:
+    if variant == "static_p15_cityday_curated":
         return "--"
     return "-"
 
 
 def variant_marker(variant: str) -> str:
-    """Return a stable marker shape from variant flavor (twoRef / noBoot / vanilla)."""
+    """Return a stable marker shape encoding the variant flavor.
+
+    - ``o``: vanilla / single-ref (default)
+    - ``s``: two-reference Mahalanobis
+    - ``X``: bootstrap-only ablation (noBoot)
+    - ``D``: static threshold filter
+    - ``*``: no-filter ceiling
+    - ``.``: random baseline
+    """
     if "twoRef" in variant:
         return "s"
     if "noBoot" in variant:
@@ -163,13 +158,20 @@ def plot_inventory_scatter(
     inv: pd.DataFrame,
     *,
     manifest: str = "curated",
-    figsize: Tuple[float, float] = (7.5, 5.0),
+    headline_variants: Optional[Sequence[str]] = None,
+    annotate_filters_only: bool = True,
+    figsize: Tuple[float, float] = (7.0, 4.6),
 ) -> Tuple[Figure, Axes]:
     """Scatter of accept_rate (x) vs smoothed_mAP (y) with random-baseline curve.
 
-    Random baselines for the same manifest are joined into a reference
-    curve so the eye can read "where would a random filter at this accept
-    rate land".  Filters above the curve outperform iso-accept random.
+    The full set of randoms is always used to draw the iso-accept
+    envelope (the dotted grey curve); a filter sitting above the curve
+    beats iso-accept random.  ``headline_variants`` restricts the
+    plotted *points* to the requested subset (defaults to all variants
+    on the manifest, which is what the appendix figure wants).  When
+    ``annotate_filters_only`` is True, random and no-filter markers
+    carry no per-point label -- the dotted random curve and the
+    no-filter star are self-explanatory and clutter slows the eye.
     """
     sub = inv[inv["manifest"] == manifest].copy()
     if sub.empty:
@@ -179,16 +181,21 @@ def plot_inventory_scatter(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Random reference curve
+    # Random reference curve always drawn from *all* randoms in `inv`.
     rand = sub[sub["family"] == "random"].sort_values("accept_rate")
     if not rand.empty:
         ax.plot(rand["accept_rate"], rand["smoothed_mAP"],
                 color=FAMILY_COLORS.get("random", "#7f7f7f"),
-                linestyle="--", linewidth=1.2, alpha=0.8,
-                label="random envelope", zorder=1)
+                linestyle=":", linewidth=1.2, alpha=0.8,
+                label="iso-accept random envelope", zorder=1)
 
-    # All variants as scatter, colored by family with seed-std error bars
-    for _, row in sub.iterrows():
+    # Restrict points to the headline subset if requested.
+    if headline_variants is not None:
+        sub_pts = sub[sub["variant"].isin(list(headline_variants))]
+    else:
+        sub_pts = sub
+
+    for _, row in sub_pts.iterrows():
         ax.errorbar(
             row["accept_rate"], row["smoothed_mAP"],
             yerr=row["smoothed_std"] if pd.notna(row["smoothed_std"]) else 0,
@@ -198,19 +205,22 @@ def plot_inventory_scatter(
             capsize=2, elinewidth=0.6,
             alpha=0.95, zorder=3,
         )
-        ax.annotate(row["label"], (row["accept_rate"], row["smoothed_mAP"]),
-                    xytext=(4, 4), textcoords="offset points",
-                    fontsize=7.5, color="#333333")
+        skip = (annotate_filters_only
+                and row["family"] in {"random", "none"})
+        if not skip:
+            ax.annotate(row["label"], (row["accept_rate"], row["smoothed_mAP"]),
+                        xytext=(5, 4), textcoords="offset points",
+                        fontsize=7.5, color="#333333")
 
     ax.set_xlabel("Effective accept rate")
     ax.set_ylabel("Smoothed tail-5 mAP")
-    ax.set_title(f"Iso-accept leaderboard — {manifest} stream",
-                 fontsize=11, loc="left")
     ax.grid(True, alpha=0.3)
 
-    # Family legend
-    fams_in_plot = sorted(sub["family"].unique())
-    handles = [mpatches.Patch(color=FAMILY_COLORS.get(f, "#444"), label=f)
+    # Family legend (one swatch per family that appears in the plot).
+    fams_in_plot = [f for f in ["none", "static", "window", "reservoir", "random"]
+                    if f in set(sub_pts["family"]) | set(rand["family"])]
+    handles = [mpatches.Patch(color=FAMILY_COLORS.get(f, "#444"),
+                              label={"none": "no-filter"}.get(f, f))
                for f in fams_in_plot]
     ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.9)
 
@@ -253,8 +263,6 @@ def plot_iso_accept_scatter(
     ax.axhline(0.0, color="#555555", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.set_xlabel("Filter accept rate")
     ax.set_ylabel(r"$\Delta$ smoothed mAP (filter $-$ iso-accept random)")
-    ax.set_title(f"Iso-accept gain — {manifest} stream",
-                 fontsize=11, loc="left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig, ax
@@ -266,7 +274,7 @@ def plot_overall_mAP_trajectory(
     x_col: str = "items_processed",
     figsize: Tuple[float, float] = (8.0, 4.5),
     block_transitions: Optional[Sequence[Tuple[int, str]]] = None,
-    title: str = "Streaming mAP",
+    title: str = "",
 ) -> Tuple[Figure, Axes]:
     """Plot overall mAP vs ``x_col`` for multiple variants (already aggregated).
 
@@ -285,6 +293,7 @@ def plot_overall_mAP_trajectory(
         grp = grp.sort_values(x_col)
         c = variant_color(v)
         ax.plot(grp[x_col], grp["mAP"], color=c, label=sa.label_for(v),
+                linestyle=variant_linestyle(v),
                 linewidth=1.4, alpha=0.9)
         if "mAP_std" in grp.columns:
             ax.fill_between(grp[x_col],
@@ -294,7 +303,8 @@ def plot_overall_mAP_trajectory(
 
     ax.set_xlabel("items processed" if x_col == "items_processed" else x_col)
     ax.set_ylabel("mAP")
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, axis="y", alpha=0.3)
     ax.grid(False, axis="x")
     ax.legend(loc="lower right", fontsize=8, ncol=2, framealpha=0.85)
@@ -322,8 +332,6 @@ def plot_smoothed_leaderboard(
                    xerr=sub.get("smoothed_std"), capsize=2,
                    edgecolor="white", linewidth=0.5)
     ax.set_xlabel(sort_by.replace("_", " "))
-    ax.set_title(f"{sort_by.replace('_', ' ')} — {manifest}",
-                 fontsize=11, loc="left")
     ax.grid(True, axis="x", alpha=0.3)
     # Annotate accept rate on the right of each bar
     for bar, ar in zip(bars, sub["accept_rate"]):
@@ -344,7 +352,7 @@ def plot_per_domain_heatmap(
     cmap: str = "viridis",
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
-    title: str = "Per-domain end-of-stream mAP",
+    title: str = "",
     figsize: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Figure, Axes]:
     """Heatmap of (block x variant) mAP grid."""
@@ -392,7 +400,7 @@ def plot_per_domain_bars(
     grid: pd.DataFrame,
     *,
     variants: Optional[Sequence[str]] = None,
-    title: str = "Per-domain end-of-stream mAP",
+    title: str = "",
     figsize: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Figure, Axes]:
     """Grouped bar chart of (block x variant) mAP, optionally sub-selecting variants."""
@@ -417,7 +425,8 @@ def plot_per_domain_bars(
     ax.set_xticks(x)
     ax.set_xticklabels(df.index, rotation=40, ha="right", fontsize=8)
     ax.set_ylabel("mAP")
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(fontsize=7.5, ncol=min(len(df.columns), 4), framealpha=0.85)
     fig.tight_layout()
@@ -429,15 +438,27 @@ def plot_per_block_trajectory(
     blocks: Sequence[str],
     *,
     x_col: str = "items_processed",
-    n_cols: int = 3,
-    figsize_per_panel: Tuple[float, float] = (4.0, 2.5),
-    title: str = "Per-block mAP trajectory",
+    n_cols: int = 2,
+    figsize_per_panel: Tuple[float, float] = (3.6, 2.4),
+    smoothing_window: int = 1,
+    title: str = "",
 ) -> Tuple[Figure, np.ndarray]:
     """Per-block mAP-over-time, faceted with one panel per block.
 
-    ``trajectories`` is ``{variant_name: long_df}`` from
-    `streaming.per_domain_trajectory`.  Each ``long_df`` has
-    columns ``checkpoint_idx, items_processed, optimizer_steps, bucket, mAP``.
+    ``trajectories`` is ``{variant: long_df}`` from
+    :func:`streaming.per_domain_trajectory`; each ``long_df`` has
+    columns ``checkpoint_idx, items_processed, optimizer_steps, bucket,
+    mAP, mAP_std, n``.
+
+    Confidence bands (``mAP +/- mAP_std``) are drawn only for variants
+    rendered as solid lines.  Two-ref / dashed variants skip the
+    ``fill_between`` because they share a family color with their
+    single-ref counterpart, so two overlapping bands of identical hue
+    just merge into a single bigger blob.
+
+    A ``smoothing_window > 1`` applies a centred rolling mean to
+    ``mAP`` (and matching square-root smoothing to ``mAP_std``) for
+    display only; the underlying CSV exports stay raw.
     """
     blocks = list(blocks)
     n = len(blocks)
@@ -456,8 +477,26 @@ def plot_per_block_trajectory(
             if sub.empty:
                 continue
             sub = sub.sort_values(x_col) if x_col in sub.columns else sub
-            ax.plot(sub[x_col], sub["mAP"], color=variant_color(variant),
-                    label=sa.label_for(variant), linewidth=1.2, alpha=0.9)
+            xs = sub[x_col].to_numpy()
+            ys = sub["mAP"].to_numpy()
+            ys_std = (sub["mAP_std"].fillna(0.0).to_numpy()
+                      if "mAP_std" in sub.columns
+                      else np.zeros_like(ys))
+            if smoothing_window > 1:
+                w = int(smoothing_window)
+                ys = pd.Series(ys).rolling(w, center=True, min_periods=1).mean().to_numpy()
+                ys_std = pd.Series(ys_std).rolling(w, center=True, min_periods=1).mean().to_numpy() / np.sqrt(w)
+            ls = variant_linestyle(variant)
+            c = variant_color(variant)
+            ax.plot(xs, ys, color=c, linestyle=ls,
+                    label=sa.label_for(variant), linewidth=1.3, alpha=0.95)
+            # Solid-line variants get a faint cross-seed std band; dashed
+            # (two-ref / no-anchor) variants share the family hue with
+            # their solid sibling and would just merge into the same
+            # band, so we draw the line only.
+            if ls == "-" and ys_std.any():
+                ax.fill_between(xs, ys - ys_std, ys + ys_std,
+                                color=c, alpha=0.14, linewidth=0)
         ax.set_title(block, fontsize=9, loc="left")
         ax.grid(True, axis="y", alpha=0.3)
         ax.grid(False, axis="x")
@@ -467,13 +506,14 @@ def plot_per_block_trajectory(
             ax.set_xlabel(x_col.replace("_", " "), fontsize=8)
     for idx in range(n, len(axes_flat)):
         axes_flat[idx].axis("off")
-    # Single shared legend on the right
     handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper right", fontsize=7.5,
-                   framealpha=0.9, ncol=1, bbox_to_anchor=(1.02, 1.0))
-    fig.suptitle(title, fontsize=11, x=0.01, ha="left")
-    fig.tight_layout(rect=(0, 0, 0.97, 0.97))
+        fig.legend(handles, labels, loc="lower center", fontsize=8,
+                   framealpha=0.9, ncol=min(len(handles), 4),
+                   bbox_to_anchor=(0.5, -0.02))
+    if title:
+        fig.suptitle(title, fontsize=11, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0.05, 1.0, 0.98))
     return fig, axes
 
 
@@ -481,7 +521,7 @@ def plot_balanced_vs_worst(
     summary: pd.DataFrame,
     *,
     figsize: Tuple[float, float] = (7.5, 4.5),
-    title: str = "Balanced vs worst-block mAP per variant",
+    title: str = "",
 ) -> Tuple[Figure, Axes]:
     """Scatter of balanced (mean) mAP vs worst-block mAP."""
     fig, ax = plt.subplots(figsize=figsize)
@@ -507,7 +547,8 @@ def plot_balanced_vs_worst(
             label="y = x")
     ax.set_xlabel("Balanced mAP (mean over blocks)")
     ax.set_ylabel("Worst-block mAP")
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig, ax
@@ -521,7 +562,7 @@ def plot_per_block_routing(
     rate_grid: pd.DataFrame,
     *,
     baseline_label: Optional[str] = "rand_p33",
-    title: str = "Per-block accept rate",
+    title: str = "",
     figsize: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Figure, Axes]:
     """Heatmap of per-block accept rate, optionally normalised by a random row."""
@@ -537,6 +578,126 @@ def plot_per_block_routing(
                   title=title, annotate=True, fmt="{:.2f}")
     fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02, label="accept rate")
     fig.tight_layout()
+    return fig, ax
+
+
+def plot_per_block_routing_lines(
+    rate_grid: pd.DataFrame,
+    *,
+    filter_variants: Sequence[str],
+    random_refs: Optional[Mapping[str, float]] = None,
+    static_variant: Optional[str] = None,
+    title: str = "",
+    figsize: Tuple[float, float] = (7.0, 4.2),
+    ymax: float = 0.6,
+) -> Tuple[Figure, Axes]:
+    """Per-block accept rate as a line plot (alternative to ``plot_per_block_routing``).
+
+    ``rate_grid`` is the wide-format DataFrame produced by
+    :func:`streaming.per_block_routing`: one row per block, one column
+    per variant, values are accept rates.  This view is preferred over
+    a heatmap when the central narrative is "filter X dips at block 5,
+    peaks at block 9": each filter is drawn as its own polyline along
+    the block axis, so adjacent-block changes are read directly.
+
+    Args:
+        filter_variants: variants to draw as full polylines (typically
+            the four headline filter variants).
+        random_refs: ``{label: value}`` map of horizontal reference
+            lines (e.g. ``{"Random p21": 0.21, "Random p33": 0.33}``).
+            Drawn as faint grey horizontal lines because per-block
+            random accept rates are uniform by construction.
+        static_variant: if given, draw the static-filter trace on a
+            twinned right-hand axis (typically 0.6-1.0) so the filter
+            polylines below stay zoomed in.
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+    if rate_grid.empty:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+        return fig, ax
+
+    blocks = list(rate_grid.index)
+    x = np.arange(len(blocks))
+
+    # Random reference horizontal lines (random accept rate is uniform
+    # across blocks by construction; one number per random suffices).
+    # Render with progressively darker greys so multiple randoms are
+    # distinguishable in the legend.
+    random_handles: List = []
+    if random_refs:
+        ref_items = list(random_refs.items())
+        for i, (ref_label, ref_value) in enumerate(ref_items):
+            shade = ["#a8a8a8", "#7a7a7a", "#525252"][min(i, 2)]
+            line = ax.axhline(ref_value, color=shade, linestyle=":",
+                              linewidth=1.1, alpha=0.85, label=ref_label)
+            random_handles.append(line)
+
+    # `rate_grid` columns are print-friendly variant labels (see
+    # ``streaming.per_block_routing``); look the variant up by label.
+    handles, labels = [], []
+    for v in filter_variants:
+        col = sa.label_for(v)
+        if col not in rate_grid.columns:
+            continue
+        ys = rate_grid[col].values
+        line, = ax.plot(
+            x, ys,
+            color=variant_color(v),
+            linestyle=variant_linestyle(v),
+            marker=variant_marker(v),
+            markersize=5, markeredgecolor="white", markeredgewidth=0.4,
+            linewidth=1.4, alpha=0.95,
+        )
+        handles.append(line)
+        labels.append(sa.label_for(v))
+
+    # Static on twinned axis (0.5-1.0) when requested.
+    static_col = sa.label_for(static_variant) if static_variant else None
+    if static_col is not None and static_col in rate_grid.columns:
+        ax2 = ax.twinx()
+        ys = rate_grid[static_col].values
+        line, = ax2.plot(
+            x, ys,
+            color=variant_color(static_variant),
+            linestyle=variant_linestyle(static_variant),
+            marker=variant_marker(static_variant),
+            markersize=5, markeredgecolor="white", markeredgewidth=0.4,
+            linewidth=1.2, alpha=0.85,
+        )
+        ax2.set_ylim(0.5, 1.02)
+        ax2.set_ylabel(f"accept rate ({sa.label_for(static_variant)})",
+                       color=variant_color(static_variant), fontsize=8)
+        ax2.tick_params(axis="y", labelcolor=variant_color(static_variant),
+                        labelsize=8)
+        ax2.spines["top"].set_visible(False)
+        handles.append(line)
+        labels.append(sa.label_for(static_variant))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(blocks, rotation=40, ha="right", fontsize=8)
+    ax.set_ylim(0.0, ymax)
+    ax.set_ylabel("Accept rate")
+    ax.grid(True, axis="y", alpha=0.3)
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
+
+    # Combined legend: filter polylines + dashed random references +
+    # static (if drawn on a twinned axis).  Putting the random refs
+    # into the legend instead of as right-edge text avoids collision
+    # with the static axis tick labels.
+    legend_handles = list(handles)
+    legend_labels = list(labels)
+    legend_handles.extend(random_handles)
+    legend_labels.extend(h.get_label() for h in random_handles)
+    if legend_handles:
+        ax.legend(
+            legend_handles, legend_labels,
+            fontsize=7.5, loc="upper center",
+            bbox_to_anchor=(0.5, 1.18),
+            ncol=min(len(legend_handles), 4),
+            framealpha=0.9, columnspacing=1.2, handlelength=1.8,
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     return fig, ax
 
 
@@ -579,7 +740,7 @@ def plot_rolling_accept_rate(
     composition_palettes: Optional[Mapping[str, Mapping[str, str]]] = None,
     composition_titles: Optional[Mapping[str, str]] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    title: str = "Accept rate per stream window",
+    title: str = "",
     window: int = 1000,
 ) -> Tuple[Figure, np.ndarray]:
     """Multi-panel accept-rate-with-stream-composition plot.
@@ -627,12 +788,20 @@ def plot_rolling_accept_rate(
         means = df["accept_rate_mean"].to_numpy()
         stds = df.get("accept_rate_std",
                       pd.Series(np.zeros_like(means))).fillna(0.0).to_numpy()
-        ax.plot(xs, means, color=variant_color(variant),
-                lw=1.5, alpha=0.95, ls=variant_linestyle(variant),
+        ls = variant_linestyle(variant)
+        c = variant_color(variant)
+        ax.plot(xs, means, color=c, lw=1.5, alpha=0.95, ls=ls,
                 label=sa.label_for(variant), zorder=3)
-        ax.fill_between(xs, means - stds, means + stds,
-                        color=variant_color(variant), alpha=0.13,
-                        linewidth=0, zorder=2)
+        # Only the solid-line variant in a (single-ref, two-ref) pair
+        # gets a +/-1-seed-std band: the two share a family hue, so
+        # drawing both bands collapses into a single oversized blob
+        # the eye cannot decompose.  The two-ref polyline still tracks
+        # the band's centerline accurately enough for cross-seed
+        # comparison.
+        if ls == "-":
+            ax.fill_between(xs, means - stds, means + stds,
+                            color=c, alpha=0.14,
+                            linewidth=0, zorder=2)
     if not has_data:
         ax.text(0.5, 0.5, "no data", ha="center", va="center",
                 transform=ax.transAxes)
@@ -642,7 +811,8 @@ def plot_rolling_accept_rate(
         _annotate_block_numbers(ax, midpoints)
     ax.set_ylabel("Accept rate")
     ax.set_ylim(bottom=0.0)
-    ax.set_title(title, fontsize=10, loc="left", pad=14)
+    if title:
+        ax.set_title(title, fontsize=10, loc="left", pad=14)
     ax.grid(True, axis="y", alpha=0.3)
     ax.grid(False, axis="x")
     if has_data:
@@ -694,7 +864,7 @@ def plot_rolling_accept_rate(
 def plot_ablation_pair_bar(
     pair_df: pd.DataFrame,
     *,
-    title: str = "Ablation pairs",
+    title: str = "",
     figsize: Tuple[float, float] = (7.0, 3.5),
 ) -> Tuple[Figure, Axes]:
     """Side-by-side bars: baseline_smoothed vs ablated_smoothed.
@@ -722,7 +892,8 @@ def plot_ablation_pair_bar(
     ax.set_xticks(x)
     ax.set_xticklabels(pair_df["pair"], rotation=10, ha="right", fontsize=8)
     ax.set_ylabel("smoothed tail-5 mAP")
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -732,7 +903,7 @@ def plot_ablation_pair_bar(
 def plot_per_class_heatmap(
     grid: pd.DataFrame,
     *,
-    title: str = "Per-class end-of-stream AP",
+    title: str = "",
     figsize: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Figure, Axes]:
     """Heatmap of the (class x variant) per-class AP grid."""
@@ -745,7 +916,7 @@ def plot_per_class_trajectory(
     *,
     x_col: str = "items_processed",
     figsize_per_panel: Tuple[float, float] = (4.2, 2.5),
-    title: str = "Per-class AP trajectory",
+    title: str = "",
 ) -> Tuple[Figure, np.ndarray]:
     """Per-class AP-over-stream, faceted with one panel per class."""
     classes = list(classes)
@@ -780,7 +951,8 @@ def plot_per_class_trajectory(
     if handles:
         fig.legend(handles, labels, loc="upper right", fontsize=7.5,
                    framealpha=0.9, ncol=1, bbox_to_anchor=(1.02, 1.0))
-    fig.suptitle(title, fontsize=11, x=0.01, ha="left")
+    if title:
+        fig.suptitle(title, fontsize=11, x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0, 0.97, 0.97))
     return fig, axes
 
@@ -824,7 +996,7 @@ def plot_refresh_segment_decay(
     seg: pd.DataFrame,
     *,
     figsize: Tuple[float, float] = (8.5, 4.0),
-    title: str = "Per-refresh accept rate (within-segment decay)",
+    title: str = "",
 ) -> Tuple[Figure, Axes]:
     """Line plot of accept rate vs refresh index for each variant."""
     fig, ax = plt.subplots(figsize=figsize)
@@ -834,12 +1006,15 @@ def plot_refresh_segment_decay(
     for variant, grp in seg.groupby("variant", sort=False):
         grp = grp.sort_values("refresh_idx")
         ax.plot(grp["refresh_idx"], grp["accept_rate"],
-                marker="o", markersize=4, linewidth=1.2,
+                marker=variant_marker(variant),
+                linestyle=variant_linestyle(variant),
+                markersize=4, linewidth=1.2,
                 color=variant_color(variant),
                 label=sa.label_for(variant), alpha=0.9)
     ax.set_xlabel("refresh index (-1 = pre-first-refresh)")
     ax.set_ylabel("segment accept rate")
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=7.5, framealpha=0.85)
     fig.tight_layout()
@@ -851,7 +1026,7 @@ def plot_steps_to_target(
     *,
     x_col: str = "optimizer_steps",
     figsize: Optional[Tuple[float, float]] = None,
-    title: str = "Steps to reach a target mAP",
+    title: str = "",
 ) -> Tuple[Figure, Axes]:
     """Grouped bar chart: target_mAP on x, optimizer_steps on y, bars per variant."""
     if steps.empty:
@@ -875,7 +1050,8 @@ def plot_steps_to_target(
     ax.set_xticklabels([f"{t:.3f}" for t in pivot.index], fontsize=8)
     ax.set_xlabel("target mAP")
     ax.set_ylabel(x_col.replace("_", " "))
-    ax.set_title(title, fontsize=11, loc="left")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(fontsize=7, ncol=min(len(pivot.columns), 4),
               framealpha=0.85, loc="upper left")
@@ -890,32 +1066,44 @@ def plot_static_vs_adaptive(
     figsize: Tuple[float, float] = (6.5, 4.0),
 ) -> Tuple[Figure, Axes]:
     """Bar chart positioning static_p15/p20 against adaptive p20 variants and randoms."""
-    keep_labels = [
-        "no_filter", "rand_p33", "rand_p77",
-        "static_p15", "static_p20",
-        "Win_p20", "Win_p20_twoRef", "Res_p20", "Res_p20_twoRef",
+    keep_variants = [
+        "no_filter_cityday_curated",
+        "random_p33_cityday_curated",
+        "random_p77_cityday_curated",
+        "static_p15_cityday_curated",
+        "static_p20_cityday_curated",
+        "adaptive_window_p20_cityday_curated",
+        "adaptive_window_p20_twoRef_cityday_curated",
+        "adaptive_reservoir_p20_cityday_curated",
+        "adaptive_reservoir_p20_twoRef_cityday_curated",
     ]
     sub = inv[(inv["manifest"] == manifest) &
-              inv["label"].isin(keep_labels)].copy()
-    sub["order"] = sub["label"].map({lab: i for i, lab in enumerate(keep_labels)})
+              inv["variant"].isin(keep_variants)].copy()
+    sub["order"] = sub["variant"].map({v: i for i, v in enumerate(keep_variants)})
     sub = sub.sort_values("order")
     fig, ax = plt.subplots(figsize=figsize)
     if sub.empty:
         ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
         return fig, ax
     colors = [variant_color(v) for v in sub["variant"]]
+    # Hatch the two-ref / non-headline variants so single-ref vs
+    # two-ref pairs sharing a family hue are visually distinct in
+    # greyscale print.
+    hatches = ["//" if "twoRef" in v else "" for v in sub["variant"]]
     bars = ax.bar(sub["label"], sub["smoothed_mAP"], color=colors,
                   yerr=sub["smoothed_std"], capsize=2,
                   edgecolor="white", linewidth=0.5)
+    for bar, h in zip(bars, hatches):
+        if h:
+            bar.set_hatch(h)
+            bar.set_edgecolor("white")
     for bar, ar in zip(bars, sub["accept_rate"]):
         ax.text(bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.001,
                 f"{ar:.2f}", ha="center", fontsize=7, color="#333")
-    ax.set_ylabel("smoothed tail-5 mAP")
+    ax.set_ylabel("Smoothed tail-5 mAP")
     ax.set_xlabel("(numbers above bars: empirical accept rate)")
-    ax.set_title(f"Static vs adaptive at p20 — {manifest}",
-                 fontsize=11, loc="left")
     ax.grid(True, axis="y", alpha=0.3)
-    ax.tick_params(axis="x", labelrotation=20)
+    ax.tick_params(axis="x", labelrotation=25)
     fig.tight_layout()
     return fig, ax

@@ -1,11 +1,17 @@
-# Random filter baseline: city-mixed bootstrap, road_type ordering (city-first)
-# Bootstrap: 5k city frames (proportional day/night/twilight mix, shared prefix)
-# Stream: city → arterial-urban → highway → arterial-rural → smaller-rural
+# Adaptive distribution filter -- reservoir mode -- city-day bootstrap,
+# curated 13-block ordering.
+#
+# The scoring-model snapshot is refreshed every K buffer flushes; the
+# reference (mean/cov/threshold) is recomputed over the bootstrap frames
+# plus a uniform random reservoir of the last R accepted stream frames
+# (Vitter's Algorithm R), re-embedded through the new snapshot.
+#
+# Reservoir vs sliding-window comparison: this config pairs with
+# adaptive_window_p20_cityday_curated.yaml at the same percentile.
 
-manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_citymix_road_type.json"
-output_dir: "outputs/streaming/random_filter_citymix_road_type"
+manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
+output_dir: "outputs/streaming/adaptive_reservoir_p20_cityday_curated"
 
-# Model / classes
 num_classes: 11
 target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
 trainable_backbone_layers: 3
@@ -15,14 +21,12 @@ pretrained_backbone: true
 pretrained_detector: true
 load_checkpoint: null
 
-# Bootstrap phase
 bootstrap_run_dir: null
-bootstrap_frames: 5000
+bootstrap_frames: 2000
 bootstrap_epochs: 20
 bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
-# Streaming phase
 streaming_lr: 1.0e-4
 weight_decay: 1.0e-4
 max_grad_norm: 1.0
@@ -33,20 +37,22 @@ local_epochs_per_buffer: 2
 mini_batch_size: 8
 shuffle_buffer_each_epoch: true
 
-# Streaming LR schedule (linear warmup + cosine decay)
 streaming_lr_warmup_items: 1000
 streaming_lr_min_factor: 0.1
 
-# Augmentation
 augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-# Filtering: random accept with probability accept_fraction
-filter_policy: "random"
-accept_fraction: 0.55
+filter_policy: "distribution"
+accept_fraction: 0.20
+threshold_percentile: 0.20
 
-# Evaluation
+scoring_refresh_every_flushes: 50
+scoring_refresh_window_size: 0
+scoring_refresh_reservoir_size: 2000
+scoring_refresh_batch_size: 16
+
 eval_every_n_items: 5000
 checkpoint_interval: 1000
 score_threshold: 0.3
@@ -56,10 +62,8 @@ bootstrap_smoke_score_threshold: 0.3
 bootstrap_smoke_min_map50: 0.005
 bootstrap_fail_on_smoke_check: true
 
-# DataLoader
 num_workers: 8
 use_amp: true
 
-# Reproducibility
 seed: 42
 device: "cuda"

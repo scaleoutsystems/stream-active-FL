@@ -41,7 +41,7 @@ import yaml
 # =============================================================================
 
 
-def find_project_root(start: Path | None = None) -> Path:
+def find_project_root(start: Optional[Path] = None) -> Path:
     """Walk upward from start until pyproject.toml + src/stream_active_fl exist."""
     cur = (start or Path.cwd()).resolve()
     for p in [cur, *cur.parents]:
@@ -1537,26 +1537,33 @@ DOMAIN_COLORS: Dict[str, str] = {
     "smaller-rural": "#9467bd",
 }
 
-# Canonical colors for time_of_day values.
+# Canonical colors for time_of_day values.  Twilight uses a magenta
+# distinct from the orange ("highway") and the warm-yellow ("day")
+# tones in the road-type / weather composition palettes; this avoids
+# cross-panel hue collisions when several composition panels stack.
 TOD_COLORS: Dict[str, str] = {
-    "day": "#FFD700",
-    "twilight": "#FF8C00",
-    "dawn/dusk": "#FF8C00",
-    "night": "#191970",
+    "day":       "#F1C40F",  # warm yellow
+    "twilight":  "#C71585",  # magenta -- distinct from highway orange
+    "dawn/dusk": "#C71585",
+    "night":     "#1F3A93",  # deep indigo
 }
 
-# Canonical colors for weather / conditions blocks.
+# Canonical colors for weather / conditions buckets.  Designed for the
+# 4-bucket weather panel (clear / cloudy / rain_wet / snow); fog is
+# folded into cloudy upstream, so its hue is intentionally close to
+# cloudy.  These colors avoid collision with the road-type palette
+# (which leans on blues + greens + orange).
 WEATHER_COLORS: Dict[str, str] = {
-    "clear": "#FDDA0D",
-    "cloudy": "#A9A9A9",
-    "partly_cloudy": "#BDC3C7",
-    "fog": "#C4C3D0",
-    "rain_wet": "#4682B4",
-    "rain": "#4682B4",
-    "snow": "#E0F0FF",
-    "wet": "#5DADE2",
-    "dry": "#F5CBA7",
-    "unknown": "#CCCCCC",
+    "clear":         "#FFE066",  # bright sunny yellow
+    "cloudy":        "#B0B7BF",  # neutral grey
+    "partly_cloudy": "#CBD2D9",
+    "fog":           "#9C9C9C",  # darker grey (folded into cloudy)
+    "rain_wet":      "#3498DB",  # rain blue
+    "rain":          "#3498DB",
+    "snow":          "#E5E9F0",  # snow white-blue
+    "wet":           "#5DADE2",
+    "dry":           "#F5CBA7",
+    "unknown":       "#CCCCCC",
 }
 
 # Short display names for road_type categories.
@@ -1764,17 +1771,39 @@ def client_domain_labels(
 # =============================================================================
 
 
-def setup_notebook_style(dpi: int = 140, base_font_size: int = 9) -> None:
-    """Apply consistent matplotlib rcParams across analysis notebooks."""
+def setup_notebook_style(dpi: int = 150) -> None:
+    """Apply consistent matplotlib rcParams across analysis notebooks.
+
+    The styling targets a standard LaTeX thesis body: Computer-Modern
+    serif typography (with DejaVu Serif fallback), 9-10 pt axis labels
+    and ticks so figures stay legible when scaled to a 6-inch
+    text-column, top/right axis spines hidden, and PDFs cropped to
+    bounding-box for clean ``\\includegraphics`` imports.
+
+    Plot helpers in ``stream_active_fl.analysis.figures`` follow the
+    same convention: they leave the figure title empty by default and
+    emit print-friendly variant labels (LaTeX captions carry the
+    description, not in-figure titles).
+    """
     import matplotlib.pyplot as plt
 
     plt.rcParams.update({
         "figure.dpi": dpi,
-        "font.size": base_font_size,
-        "axes.titlesize": base_font_size + 1,
-        "axes.labelsize": base_font_size,
-        "legend.fontsize": base_font_size - 1,
-        "xtick.labelsize": base_font_size - 1,
-        "ytick.labelsize": base_font_size - 1,
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "DejaVu Serif",
+                       "Times New Roman", "Times"],
+        "mathtext.fontset": "cm",
+        "font.size": 10,
+        "axes.titlesize": 10,
+        "axes.labelsize": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
         "figure.facecolor": "white",
     })
