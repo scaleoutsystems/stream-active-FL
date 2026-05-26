@@ -1,8 +1,5 @@
-# Federated adaptive Window filter, two-reference Mahalanobis variant
-# at threshold percentile 0.20 on the city-day curated stream.  At each
-# refresh fits two Gaussians (one on bootstrap, one on the fleet-pooled
-# accepted window) and uses score = min(d_boot, d_adapt).  Mirrors the
-# streaming twoRef variant which gave the best win on Window.
+# Adaptive distribution filter, sliding-window mode, two-reference, heavy-local schedule
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/federated/fed_adaptive_window_p20_twoRef_cityday_curated_heavyLocal"

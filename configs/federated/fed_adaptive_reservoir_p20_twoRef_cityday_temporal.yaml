@@ -1,8 +1,5 @@
-# Federated adaptive Reservoir filter, two-reference Mahalanobis variant
-# at threshold percentile 0.20 on the city-day TEMPORAL stream
-# (default schedule: 30 rounds x 1000 local items, contiguous = time-aligned
-# client partition).  Mirrors the HL temporal grid but at default schedule.
-# Bootstrap reuses fed_no_filter_cityday_curated (identical frame ids).
+# Adaptive distribution filter, reservoir mode, two-reference
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/federated/fed_adaptive_reservoir_p20_twoRef_cityday_temporal"

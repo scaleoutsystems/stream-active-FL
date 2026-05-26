@@ -1,8 +1,5 @@
-# Federated static distribution filter (bootstrap-only Mahalanobis;
-# no refresh) at threshold percentile 0.20 on the city-day curated
-# stream.  Mirrors streaming static_p20: shows that an unrefreshed
-# reference saturates accept rate near 1.0 on novel domains and so
-# loses budget control under domain shift.
+# Static distribution filter
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/federated/fed_static_p20_cityday_curated"

@@ -1,9 +1,5 @@
-# Federated no-filter baseline on the city-day TEMPORAL stream (default
-# schedule: 30 rounds x 1000 local items).  Same 13 stream blocks as the
-# curated manifest, ordered chronologically.  Contiguous client partition
-# corresponds to four time quartiles (each ~22k frames).
-# Bootstrap (first 2000 frames in time order) shares identifiers with the
-# curated bootstrap, so curated bootstraps can be reused.
+# No-filter baseline: accepts every stream frame
+# City-day bootstrap, temporal client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/federated/fed_no_filter_cityday_temporal"

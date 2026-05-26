@@ -1,5 +1,5 @@
-# No-filter baseline: city-day bootstrap, curated 13-block ordering.
-# Accepts every stream frame (upper bound on training compute and data).
+# No-filter baseline: accepts every stream frame
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/no_filter_cityday_curated"

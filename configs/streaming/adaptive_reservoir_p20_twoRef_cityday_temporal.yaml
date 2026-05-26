@@ -1,7 +1,5 @@
-# Adaptive distribution filter -- reservoir mode + two-reference
-# Mahalanobis -- city-day bootstrap, temporal stream ordering.  Pairs
-# with adaptive_reservoir_p20_cityday_temporal at the same percentile to
-# isolate the multimodal-fit fix under the chronological stream.
+# Adaptive distribution filter, reservoir mode, two-reference
+# City-day bootstrap, temporal stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/streaming/adaptive_reservoir_p20_twoRef_cityday_temporal"

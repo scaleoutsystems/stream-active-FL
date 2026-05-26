@@ -1,14 +1,5 @@
-# Federated no-filter baseline on the city-day TEMPORAL stream.
-# Same 13 stream blocks as the curated manifest, but ordered chronologically
-# by frame timestamp instead of grouped by domain.  The contiguous client
-# partition therefore corresponds to four time quartiles (each ~22k frames):
-#   c0 = Q1 (familiar-mode-heavy: city_day_clear/cloudy + arterial-rural day)
-#   c1 = Q2 (urban_arterial + first twi-night appearance)
-#   c2 = Q3 (mixed: city_day_rain_wet + smaller-rural emerging)
-#   c3 = Q4 (night-heavy: arterial-urban_twi-night + city_night)
-# Bootstrap (first 2000 frames in time order) shares identifiers with the
-# curated bootstrap, so curated bootstraps can be reused. (heavy-local schedule)
-# num_rounds=10, local_items_per_round=3000 (same total budget, 3x fewer aggregations).
+# No-filter baseline: accepts every stream frame, heavy-local schedule
+# City-day bootstrap, temporal client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/federated/fed_no_filter_cityday_temporal_heavyLocal"

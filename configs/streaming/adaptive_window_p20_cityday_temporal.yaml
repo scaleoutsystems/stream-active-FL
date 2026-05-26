@@ -1,7 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode -- city-day bootstrap,
-# temporal stream ordering.  Pairs with adaptive_window_p20_cityday_curated.yaml
-# at the same bootstrap/percentile so we can attribute differences in
-# accept-rate routing and per-domain mAP to stream order alone.
+# Adaptive distribution filter, sliding-window mode
+# City-day bootstrap, temporal stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_cityday_temporal"

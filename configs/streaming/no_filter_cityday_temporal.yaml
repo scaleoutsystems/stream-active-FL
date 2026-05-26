@@ -1,7 +1,5 @@
-# No-filter baseline: city-day bootstrap, temporal stream ordering.
-# Same bootstrap and val split as no_filter_cityday_curated; only the
-# post-bootstrap train order differs (chronological by capture timestamp).
-# Accepts every stream frame (upper bound on training compute and data).
+# No-filter baseline: accepts every stream frame
+# City-day bootstrap, temporal stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/streaming/no_filter_cityday_temporal"

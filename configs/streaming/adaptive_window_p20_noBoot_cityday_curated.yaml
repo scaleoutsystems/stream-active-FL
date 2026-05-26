@@ -1,13 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode, NO bootstrap in
-# the reference -- city-day bootstrap (used only for backbone training),
-# curated 13-block ordering.
-#
-# scoring_include_bootstrap=false: the reference Gaussian is fitted on
-# the 1000-frame sliding window of accepts only.  Bootstrap frames are
-# excluded from the reference at every refresh.  Pairs with
-# adaptive_window_p20_cityday_curated to isolate the contribution of the
-# bootstrap anchor: does dropping the static anchor destabilise the
-# filter (drift-following), or is the adaptive window enough on its own?
+# Adaptive distribution filter, sliding-window mode, no bootstrap in the reference
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_noBoot_cityday_curated"

@@ -1,12 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode + two-reference
-# Mahalanobis -- city-day bootstrap, curated 13-block ordering.
-#
-# Two-reference mode fits one Gaussian on the bootstrap (re-embedded each
-# refresh through the new scoring model) and a second Gaussian on the
-# 1000-frame sliding window of accepts.  Per-frame score is
-# min(d_bootstrap, d_window), so a frame is "novel" only when it is far
-# from BOTH known modes.  Pairs with adaptive_window_p20_cityday_curated
-# at the same percentile to isolate the multimodal-fit fix.
+# Adaptive distribution filter, sliding-window mode, two-reference
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_twoRef_cityday_curated"

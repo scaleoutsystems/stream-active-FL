@@ -1,14 +1,5 @@
-# Federated no-filter baseline on the city-day curated stream.
-# Reuses the same manifest as the streaming chapter (13 blocks ordered
-# city-day -> low-light -> arterial-urban -> highway -> rural).  Four
-# domain-aligned clients, each owning a contiguous run of adjacent
-# blocks so every client sees a coherent deployment environment:
-#   c0 = city day (cloudy + clear)
-#   c1 = city challenging (rain/snow + twilight + night)
-#   c2 = urban arterial (day + twi-night)
-#   c3 = out-of-city (highway + arterial-rural + smaller-rural)
-# Bootstrap (first 2000 frames of city_day_cloudy) is shared. (heavy-local schedule)
-# num_rounds=10, local_items_per_round=3000 (same total budget, 3x fewer aggregations).
+# No-filter baseline: accepts every stream frame, heavy-local schedule
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/federated/fed_no_filter_cityday_curated_heavyLocal"

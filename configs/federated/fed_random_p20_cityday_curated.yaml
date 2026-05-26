@@ -1,11 +1,8 @@
-# Federated random-filter baseline at accept_fraction=0.26 on the
-# city-day curated stream.  Iso-accept partner for the p20 (HL) operating
-# points: reservoir_p20 (0.267), reservoir_p20_twoRef (0.249),
-# window_p20 (0.269), window_p20_twoRef (0.251).  (heavy-local schedule)
-# num_rounds=10, local_items_per_round=3000 (same total budget, 3x fewer aggregations).
+# Random-filter baseline, ~20% accept
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
-output_dir: "outputs/federated/fed_random_p26_cityday_curated_heavyLocal"
+output_dir: "outputs/federated/fed_random_p20_cityday_curated"
 
 num_classes: 11
 target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
@@ -23,8 +20,8 @@ bootstrap_batch_size: 8
 bootstrap_lr: 4.0e-4
 
 num_clients: 4
-num_rounds: 10
-local_items_per_round: 3000
+num_rounds: 30
+local_items_per_round: 1000
 partition_strategy: "domain_aligned"
 domain_client_groups:
   - ["city_day_cloudy", "city_day_clear"]
@@ -47,7 +44,7 @@ hflip_prob: 0.5
 color_jitter: true
 
 filter_policy: "random"
-accept_fraction: 0.26
+accept_fraction: 0.12
 
 eval_every_n_rounds: 1
 score_threshold: 0.3

@@ -1,8 +1,5 @@
-# Federated adaptive Window filter (single reference) at threshold
-# percentile 0.20 on the city-day curated stream.  Refresh every round:
-# the scoring model is replaced with a snapshot of the post-aggregation
-# global model and the reference is recomputed over the bootstrap plus
-# the most recent fleet-pooled accepted frames (window of 1500).
+# Adaptive distribution filter, sliding-window mode
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/federated/fed_adaptive_window_p20_cityday_curated"

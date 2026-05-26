@@ -1,9 +1,8 @@
-# Federated adaptive Reservoir filter, two-reference Mahalanobis variant
-# at threshold percentile 0.15 on the city-day curated stream. (heavy-local schedule)
-# num_rounds=10, local_items_per_round=3000 (same total budget, 3x fewer aggregations).
+# Random-filter baseline, ~20% accept, heavy-local schedule
+# City-day bootstrap, curated 13-block client partition
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
-output_dir: "outputs/federated/fed_adaptive_reservoir_p15_twoRef_cityday_curated_heavyLocal"
+output_dir: "outputs/federated/fed_random_p21_cityday_curated_heavyLocal"
 
 num_classes: 11
 target_classes: ["Vehicle", "Pedestrian", "VulnerableVehicle"]
@@ -44,16 +43,8 @@ augment: true
 hflip_prob: 0.5
 color_jitter: true
 
-filter_policy: "distribution"
-accept_fraction: 0.15
-threshold_percentile: 0.15
-
-scoring_refresh_every_rounds: 1
-scoring_refresh_window_size: 0
-scoring_refresh_reservoir_size: 1500
-scoring_refresh_batch_size: 16
-scoring_reference_mode: "two_reference"
-scoring_include_bootstrap: true
+filter_policy: "random"
+accept_fraction: 0.21
 
 eval_every_n_rounds: 1
 score_threshold: 0.3

@@ -1,4 +1,4 @@
-# Offline baseline: multi-epoch shuffled training on all frames (performance ceiling)
+# Offline baseline: multi-epoch shuffled training on all frames
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_temporal.json"
 output_dir: "outputs/offline/baseline"

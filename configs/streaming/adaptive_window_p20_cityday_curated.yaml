@@ -1,9 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode -- city-day
-# bootstrap, curated 13-block ordering.
-#
-# Same setup as adaptive_window_p15 with a looser percentile (p20) to
-# increase acceptance in interesting domains and close the compute gap
-# vs the random p21 baseline.
+# Adaptive distribution filter, sliding-window mode
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_cityday_curated"

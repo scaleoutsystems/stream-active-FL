@@ -1,13 +1,5 @@
-# Adaptive distribution filter -- reservoir mode -- city-day bootstrap,
-# curated 13-block ordering.
-#
-# The scoring-model snapshot is refreshed every K buffer flushes; the
-# reference (mean/cov/threshold) is recomputed over the bootstrap frames
-# plus a uniform random reservoir of the last R accepted stream frames
-# (Vitter's Algorithm R), re-embedded through the new snapshot.
-#
-# Reservoir vs sliding-window comparison: this config pairs with
-# adaptive_window_p20_cityday_curated.yaml at the same percentile.
+# Adaptive distribution filter, reservoir mode
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_reservoir_p20_cityday_curated"

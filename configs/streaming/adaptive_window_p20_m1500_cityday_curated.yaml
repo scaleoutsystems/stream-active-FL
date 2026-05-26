@@ -1,7 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode at memory size 1500
-# (matched-memory variant: same window size as the federated chapter).
-# Pairs with adaptive_reservoir_p20_m1500_cityday_curated to give a
-# fair window-vs-reservoir comparison at the same memory budget.
+# Adaptive distribution filter, sliding-window mode at memory size 1500
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_m1500_cityday_curated"

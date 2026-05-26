@@ -1,12 +1,5 @@
-# Static distribution filter -- city-day bootstrap, curated 13-block
-# ordering, threshold_percentile=0.20.  Bootstrap-only reference; neither
-# the scoring model nor the reference change once training starts (no
-# refresh).  Pairs with the adaptive_window_p20 / adaptive_reservoir_p20
-# variants at the same percentile to isolate the effect of adaptation
-# alone.  Empirical accept rate is expected to be high (>= 0.8): a static
-# bootstrap-calibrated threshold cannot enforce a tight rate against a
-# stream that is more novel than the bootstrap itself, which is itself a
-# useful comparison point.
+# Static distribution filter
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/static_p20_cityday_curated"

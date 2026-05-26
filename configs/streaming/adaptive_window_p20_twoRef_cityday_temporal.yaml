@@ -1,8 +1,5 @@
-# Adaptive distribution filter -- sliding-window mode + two-reference
-# Mahalanobis -- city-day bootstrap, temporal stream ordering.  Pairs
-# with adaptive_window_p20_cityday_temporal at the same percentile so we
-# can attribute the multimodal-fit fix to the reference structure under
-# the chronological stream.
+# Adaptive distribution filter, sliding-window mode, two-reference
+# City-day bootstrap, temporal stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_temporal_boot2000.json"
 output_dir: "outputs/streaming/adaptive_window_p20_twoRef_cityday_temporal"

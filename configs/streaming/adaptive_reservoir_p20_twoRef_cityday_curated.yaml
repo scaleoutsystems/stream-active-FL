@@ -1,14 +1,5 @@
-# Adaptive distribution filter -- reservoir mode + two-reference
-# Mahalanobis -- city-day bootstrap, curated 13-block ordering.
-#
-# Two-reference mode fits one Gaussian on the bootstrap (re-embedded each
-# refresh through the new scoring model) and a second Gaussian on the
-# size-2000 reservoir of past accepts (Vitter's Algorithm R).  Per-frame
-# score is min(d_bootstrap, d_reservoir), so a frame is "novel" only when
-# it is far from BOTH known modes.  Pairs with
-# adaptive_reservoir_p20_cityday_curated at the same percentile to test
-# whether multimodal scoring resolves the reservoir reference drift seen
-# in the single-reference variant.
+# Adaptive distribution filter, reservoir mode, two-reference
+# City-day bootstrap, curated 13-block stream ordering
 
 manifest_path: "data/ZOD_frames_preprocessed/Frames_1600x480/manifest_cityday_curated_boot2000.json"
 output_dir: "outputs/streaming/adaptive_reservoir_p20_twoRef_cityday_curated"
