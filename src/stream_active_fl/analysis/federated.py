@@ -16,8 +16,10 @@ Public surface (the things the federated notebook actually calls):
         VARIANT_FAMILY                 -- variant -> filter family
         ISO_ACCEPT_PAIRINGS            -- explicit filter <-> random pairs
         ABLATION_PAIRINGS              -- single <-> ablation pairs
-        CLIENT_LABEL                   -- 0..3 -> "C<i> <description>"
+        CLIENT_LABEL                   -- 0..3 -> "C<i>" (short id)
         DOMAIN_BLOCK_FAMILY            -- block -> "familiar" | "novel"
+        curated_client_boundaries(manifest)  -- stream start-x per curated client
+        temporal_client_boundaries(manifest) -- stream start-x per temporal client
         latest_seed_dir(variant, seed) -- newest run dir for a (variant, seed)
         variant_seed_dirs(variant)     -- {seed: run_dir} across all seeds
         manifest_for_variant(v)        -- "curated" / "curated_heavyLocal" / ...
@@ -83,22 +85,14 @@ FEATURED_VARIANTS: List[str] = [
     "fed_adaptive_window_p20_twoRef_cityday_curated",
     "fed_adaptive_reservoir_p10_cityday_curated",
     "fed_adaptive_reservoir_p10_twoRef_cityday_curated",
-    "fed_adaptive_reservoir_p15_twoRef_cityday_curated",
     "fed_adaptive_reservoir_p20_cityday_curated",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
     # Iso-accept random partners (matched to the empirical filter accepts).
     "fed_random_p7_cityday_curated",
-    "fed_random_p11_cityday_curated",
     "fed_random_p12_cityday_curated",
     "fed_random_p15_cityday_curated",
     "fed_random_p18_cityday_curated",
-    "fed_random_p26_cityday_curated",
     "fed_random_p77_cityday_curated",
-    # Refresh-density diagnostic: default schedule but
-    # scoring_refresh_every_rounds=3 (vs every round) -- inflates the
-    # accept rate at the same threshold-percentile and decomposes the
-    # refresh-cadence effect from the local-training-intensity effect.
-    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated",
 
     # ----- Default schedule, temporal partition -----
     "fed_no_filter_cityday_temporal",
@@ -124,10 +118,8 @@ FEATURED_VARIANTS: List[str] = [
 
     # ----- Heavy-local schedule, temporal partition (recovery cell) -----
     "fed_no_filter_cityday_temporal_heavyLocal",
-    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal",
     "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal",
     "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal",
-    "fed_random_p20_cityday_temporal_heavyLocal",
     "fed_random_p25_cityday_temporal_heavyLocal",
     "fed_random_p30_cityday_temporal_heavyLocal",
 ]
@@ -143,17 +135,12 @@ VARIANT_LABEL: Dict[str, str] = {
     "fed_adaptive_window_p20_twoRef_cityday_curated":             "window p20 twoRef",
     "fed_adaptive_reservoir_p10_cityday_curated":                 "reservoir p10",
     "fed_adaptive_reservoir_p10_twoRef_cityday_curated":          "reservoir p10 twoRef",
-    "fed_adaptive_reservoir_p15_twoRef_cityday_curated":          "reservoir p15 twoRef",
     "fed_adaptive_reservoir_p20_cityday_curated":                 "reservoir p20",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated":          "reservoir p20 twoRef",
-    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated":
-                                                                  "reservoir p20 twoRef (sparse refresh)",
     "fed_random_p7_cityday_curated":                              "random p7",
-    "fed_random_p11_cityday_curated":                             "random p11",
     "fed_random_p12_cityday_curated":                             "random p12",
     "fed_random_p15_cityday_curated":                             "random p15",
     "fed_random_p18_cityday_curated":                             "random p18",
-    "fed_random_p26_cityday_curated":                             "random p26",
     "fed_random_p77_cityday_curated":                             "random p77",
     # ----- Default + temporal -----
     "fed_no_filter_cityday_temporal":                             "none (T)",
@@ -178,13 +165,10 @@ VARIANT_LABEL: Dict[str, str] = {
     "fed_random_p26_cityday_curated_heavyLocal":                  "random p26 (HL)",
     # ----- Heavy-local + temporal -----
     "fed_no_filter_cityday_temporal_heavyLocal":                  "none (T, HL)",
-    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal":
-                                                                  "reservoir p10 twoRef (T, HL)",
     "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal":
                                                                   "reservoir p15 twoRef (T, HL)",
     "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal":
                                                                   "reservoir p20 twoRef (T, HL)",
-    "fed_random_p20_cityday_temporal_heavyLocal":                 "random p20 (T, HL)",
     "fed_random_p25_cityday_temporal_heavyLocal":                 "random p25 (T, HL)",
     "fed_random_p30_cityday_temporal_heavyLocal":                 "random p30 (T, HL)",
 }
@@ -203,17 +187,12 @@ THESIS_LABEL: Dict[str, str] = {
     "fed_adaptive_window_p20_twoRef_cityday_curated":             "Window two-ref",
     "fed_adaptive_reservoir_p10_cityday_curated":                 "Reservoir single-ref ($\\tau_{10}$)",
     "fed_adaptive_reservoir_p10_twoRef_cityday_curated":          "Reservoir two-ref ($\\tau_{10}$)",
-    "fed_adaptive_reservoir_p15_twoRef_cityday_curated":          "Reservoir two-ref ($\\tau_{15}$)",
     "fed_adaptive_reservoir_p20_cityday_curated":                 "Reservoir single-ref",
     "fed_adaptive_reservoir_p20_twoRef_cityday_curated":          "Reservoir two-ref",
-    "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated":
-                                                                  "Reservoir two-ref (sparse refresh)",
     "fed_random_p7_cityday_curated":                              r"Random ($\rho{=}0.07$)",
-    "fed_random_p11_cityday_curated":                             r"Random ($\rho{=}0.11$)",
     "fed_random_p12_cityday_curated":                             r"Random ($\rho{=}0.12$)",
     "fed_random_p15_cityday_curated":                             r"Random ($\rho{=}0.15$)",
     "fed_random_p18_cityday_curated":                             r"Random ($\rho{=}0.18$)",
-    "fed_random_p26_cityday_curated":                             r"Random ($\rho{=}0.26$)",
     "fed_random_p77_cityday_curated":                             r"Random ($\rho{=}0.77$)",
     "fed_no_filter_cityday_temporal":                             "No filter (temporal)",
     "fed_adaptive_reservoir_p15_twoRef_cityday_temporal":         "Reservoir two-ref (temporal, $\\tau_{15}$)",
@@ -235,13 +214,10 @@ THESIS_LABEL: Dict[str, str] = {
     "fed_random_p21_cityday_curated_heavyLocal":                  r"Random ($\rho{=}0.21$, heavy-local)",
     "fed_random_p26_cityday_curated_heavyLocal":                  r"Random ($\rho{=}0.26$, heavy-local)",
     "fed_no_filter_cityday_temporal_heavyLocal":                  "No filter (temporal, heavy-local)",
-    "fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal":
-                                                                  "Reservoir two-ref (temporal, heavy-local, $\\tau_{10}$)",
     "fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal":
                                                                   "Reservoir two-ref (temporal, heavy-local, $\\tau_{15}$)",
     "fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal":
                                                                   "Reservoir two-ref (temporal, heavy-local)",
-    "fed_random_p20_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.20$, temporal, heavy-local)",
     "fed_random_p25_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.25$, temporal, heavy-local)",
     "fed_random_p30_cityday_temporal_heavyLocal":                 r"Random ($\rho{=}0.30$, temporal, heavy-local)",
 }
@@ -311,13 +287,8 @@ ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
     ("fed_adaptive_window_p20_twoRef_cityday_curated",             "fed_random_p12_cityday_curated"),
     ("fed_adaptive_reservoir_p10_cityday_curated",                 "fed_random_p7_cityday_curated"),
     ("fed_adaptive_reservoir_p10_twoRef_cityday_curated",          "fed_random_p7_cityday_curated"),
-    ("fed_adaptive_reservoir_p15_twoRef_cityday_curated",          "fed_random_p11_cityday_curated"),
     ("fed_adaptive_reservoir_p20_cityday_curated",                 "fed_random_p18_cityday_curated"),
     ("fed_adaptive_reservoir_p20_twoRef_cityday_curated",          "fed_random_p15_cityday_curated"),
-    # The sparse-refresh variant inflates accept to ~0.26 at the same
-    # threshold percentile; pair it against random_p26 (default schedule).
-    ("fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated",
-     "fed_random_p26_cityday_curated"),
 
     # ----- Default schedule, temporal partition -----
     ("fed_adaptive_reservoir_p15_twoRef_cityday_temporal",         "fed_random_p15_cityday_temporal"),
@@ -340,8 +311,6 @@ ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
      "fed_random_p26_cityday_curated_heavyLocal"),
 
     # ----- Heavy-local schedule, temporal partition -----
-    ("fed_adaptive_reservoir_p10_twoRef_cityday_temporal_heavyLocal",
-     "fed_random_p20_cityday_temporal_heavyLocal"),
     ("fed_adaptive_reservoir_p15_twoRef_cityday_temporal_heavyLocal",
      "fed_random_p25_cityday_temporal_heavyLocal"),
     ("fed_adaptive_reservoir_p20_twoRef_cityday_temporal_heavyLocal",
@@ -420,16 +389,6 @@ ABLATION_PAIRINGS: Dict[str, List[Tuple[str, str, str]]] = {
          "fed_adaptive_reservoir_p10_twoRef_cityday_curated",
          "fed_adaptive_reservoir_p10_twoRef_cityday_curated_heavyLocal"),
     ],
-    # Sparse-refresh diagnostic: same default schedule (30 rounds x 1000
-    # items) but the scoring reference is refit only every 3 rounds
-    # (vs every round).  Inflates the accept rate at the same threshold
-    # percentile, which lets us decompose the heavy-local effect into
-    # "stale reference" vs "intense per-round local training".
-    "sparse_refresh": [
-        ("Reservoir two-ref",
-         "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
-         "fed_adaptive_reservoir_p20_twoRef_sparseRefresh_cityday_curated"),
-    ],
     # Adaptive (refreshed reference) vs static (bootstrap-only) on the
     # headline curated cell.
     "static_vs_adaptive": [
@@ -440,9 +399,6 @@ ABLATION_PAIRINGS: Dict[str, List[Tuple[str, str, str]]] = {
     # Manifest replication: does the headline finding (default + curated)
     # reproduce on the temporal stream order?
     "temporal_replication": [
-        (r"Reservoir two-ref ($\tau_{15}$)",
-         "fed_adaptive_reservoir_p15_twoRef_cityday_curated",
-         "fed_adaptive_reservoir_p15_twoRef_cityday_temporal"),
         ("Reservoir two-ref",
          "fed_adaptive_reservoir_p20_twoRef_cityday_curated",
          "fed_adaptive_reservoir_p20_twoRef_cityday_temporal"),
@@ -458,22 +414,29 @@ ABLATION_PAIRINGS: Dict[str, List[Tuple[str, str, str]]] = {
 # =============================================================================
 
 # Display labels for the four `domain_aligned` clients we use.  These
-# descriptions match the `domain_client_groups` in the curated configs.
+# descriptions match the `domain_client_groups` in the curated configs:
+# C0 owns the bootstrap distribution (city_day_clear/cloudy); C1 owns
+# the off-bootstrap city blocks (rain_wet, snow, twilight, night); C2
+# owns the urban arterial roads; C3 owns highway and rural roads.  The
+# old "city_day_novel" label was misleading because it conflated city
+# day variants with city night/twilight; the corrected labels make the
+# off-time-of-day vs off-weather composition of C1 explicit.
 CLIENT_LABEL: Dict[int, str] = {
-    0: "C0 city_day_familiar",
-    1: "C1 city_day_novel",
-    2: "C2 urban_arterial",
-    3: "C3 out_of_city",
+    0: "C0",
+    1: "C1",
+    2: "C2",
+    3: "C3",
 }
 
 # Display labels for the four `contiguous` clients used on the temporal
 # manifest.  The contiguous strategy gives each client one chronological
-# quartile of the post-bootstrap stream.
+# quartile of the post-bootstrap stream.  Kept short so they fit in a
+# single-row plot legend.
 TEMPORAL_CLIENT_LABEL: Dict[int, str] = {
-    0: "C0 Q1 (early, familiar-heavy)",
-    1: "C1 Q2 (twi-night appears)",
-    2: "C2 Q3 (rain + rural emerges)",
-    3: "C3 Q4 (night-heavy, late)",
+    0: "Q1",
+    1: "Q2",
+    2: "Q3",
+    3: "Q4",
 }
 
 
@@ -501,12 +464,171 @@ DOMAIN_BLOCK_FAMILY: Dict[str, str] = {
     "arterial-rural_day":         "novel",
     "arterial-rural_twi-night":   "novel",
     "smaller-rural_all":          "novel",
+    # Per-category buckets (time_of_day / road_condition dimensions).
+    # Treated as novel for the per-category trajectory figure, where
+    # "(novel)" is just appended to the panel title.
+    "night":                      "novel",
+    "twilight":                   "novel",
+    "wet":                        "novel",
+    "snow":                       "novel",
+    "rain_wet":                   "novel",
 }
 
 
 def block_family(block: str) -> str:
     """Return ``"familiar"``, ``"novel"`` or ``"unknown"`` for a block name."""
     return DOMAIN_BLOCK_FAMILY.get(block, "unknown")
+
+
+# Coarse client-affinity grouping for the curated `domain_aligned`
+# partition.  Each block belongs to exactly one of the four client
+# groups; the temporal manifest mixes them across all four clients.
+# This is used by the per-client domain-composition figure (the
+# four colors map back to the C0/C1/C2/C3 client palette).
+CLIENT_GROUP_OF_BLOCK: Dict[str, str] = {
+    "city_day_clear":           "city day",
+    "city_day_cloudy":          "city day",
+    "city_day_rain_wet":        "city night/twi/wet",
+    "city_day_snow":            "city night/twi/wet",
+    "city_twilight":            "city night/twi/wet",
+    "city_night":               "city night/twi/wet",
+    "arterial-urban_day":       "urban arterial",
+    "arterial-urban_twi-night": "urban arterial",
+    "highway_day":              "highway + rural",
+    "highway_twi-night":        "highway + rural",
+    "arterial-rural_day":       "highway + rural",
+    "arterial-rural_twi-night": "highway + rural",
+    "smaller-rural_all":        "highway + rural",
+}
+
+# Ordered list of the client-affinity groups (used as a stable color /
+# legend ordering for the composition stack).
+CLIENT_GROUP_ORDER: List[str] = [
+    "city day",
+    "city night/twi/wet",
+    "urban arterial",
+    "highway + rural",
+]
+
+
+def client_group_for_block(block: str) -> str:
+    """Coarse 4-way grouping of a stream block (matches the curated partition).
+
+    ``"city day"`` is the bootstrap distribution; ``"city night/twi/wet"``
+    is the off-bootstrap city blocks; the other two are the road-type
+    groupings.  Blocks not in `CLIENT_GROUP_OF_BLOCK` fall back to
+    ``"unknown"``.
+    """
+    return CLIENT_GROUP_OF_BLOCK.get(block, "unknown")
+
+
+def _stream_total_frames(
+    manifest: Optional[Mapping],
+    *,
+    bootstrap_frames: int = 0,
+) -> int:
+    """Number of post-bootstrap stream frames implied by a manifest.
+
+    Prefers ``manifest.ordering.block_sizes`` (works for curated
+    manifests) and falls back to counting ``split == "train"`` frames
+    minus ``bootstrap_frames`` (works for temporal manifests that omit
+    block sizes).
+    """
+    if not manifest:
+        return 0
+    ordering = manifest.get("ordering") or {}
+    block_sizes = dict(ordering.get("block_sizes") or {})
+    total = sum(int(v) for v in block_sizes.values())
+    if total > 0:
+        return total
+    frames = manifest.get("frames") or []
+    train = sum(1 for f in frames if (f or {}).get("split") == "train")
+    return max(0, train - int(bootstrap_frames))
+
+
+def curated_client_boundaries(
+    manifest: Optional[Mapping],
+    *,
+    bootstrap_frames: int = 0,
+) -> List[Tuple[int, str]]:
+    """Post-bootstrap frame positions where each curated client starts.
+
+    Walks the manifest block order and records the position where the
+    client group changes, giving the stream-coordinate start of each
+    domain-aligned client's data.
+
+    Args:
+        manifest: Parsed manifest dict from `runs.load_manifest`.
+        bootstrap_frames: Unused; retained for API symmetry with
+            `temporal_client_boundaries`.
+
+    Returns:
+        List of ``(start_frame_idx, label)`` sorted by frame index.
+        The first entry is always ``(0, "C0")``.  Returns an empty
+        list if the manifest lacks ordering info.
+    """
+    if not manifest:
+        return []
+    ordering = manifest.get("ordering") or {}
+    block_order = list(ordering.get("block_order") or [])
+    block_sizes = dict(ordering.get("block_sizes") or {})
+    if not block_order or not block_sizes:
+        return []
+    boundaries: List[Tuple[int, str]] = []
+    pos = 0
+    prev_group: Optional[str] = None
+    client_idx = 0
+    for b in block_order:
+        size = int(block_sizes.get(b, 0))
+        group = CLIENT_GROUP_OF_BLOCK.get(b)
+        if group is not None and group != prev_group:
+            boundaries.append((pos, f"C{client_idx}"))
+            prev_group = group
+            client_idx += 1
+        pos += size
+    return boundaries
+
+
+def temporal_client_boundaries(
+    manifest: Optional[Mapping],
+    *,
+    bootstrap_frames: int = 0,
+    num_clients: int = 4,
+) -> List[Tuple[int, str]]:
+    """Post-bootstrap frame positions where each temporal client starts.
+
+    The temporal partition splits the post-bootstrap stream into
+    ``num_clients`` equal-sized contiguous slices.
+
+    Args:
+        manifest: Parsed manifest dict from `runs.load_manifest`.
+        bootstrap_frames: Subtracted from the train-frame count when
+            inferring the post-bootstrap stream size from the manifest
+            frames (used as a fallback when ``ordering.block_sizes`` is
+            missing).
+        num_clients: Number of clients (quartiles); defaults to 4.
+
+    Returns:
+        List of ``(start_frame_idx, label)`` sorted by frame index.
+        The first entry is always ``(0, "Q1")``.  Returns an empty
+        list if the manifest provides neither block sizes nor train
+        frames.
+    """
+    if not manifest or num_clients <= 0:
+        return []
+    total = _stream_total_frames(manifest, bootstrap_frames=bootstrap_frames)
+    if total == 0:
+        return []
+    # Mirror `core.partitioning.partition_frames` (contiguous strategy)
+    # inline to avoid pulling the torch-dependent `core` package into
+    # the analysis stack.
+    base, rem = divmod(total, num_clients)
+    out: List[Tuple[int, str]] = []
+    offset = 0
+    for i in range(num_clients):
+        out.append((offset, f"Q{i + 1}"))
+        offset += base + (1 if i < rem else 0)
+    return out
 
 
 # =============================================================================
@@ -666,7 +788,11 @@ def ablation_pair_table(
     project_root: Optional[Path] = None,
     tail_k: int = 5,
 ) -> pd.DataFrame:
-    """Side-by-side stats for each (label, baseline, ablated) triple."""
+    """Side-by-side stats for each (label, baseline, ablated) triple.
+
+    Columns include both means and the seed std for ``smoothed``,
+    so the bar plotter can draw error bars without rejoining tables.
+    """
     rows: List[Dict] = []
     for label, base_v, abl_v in pairings:
         b = _stats(base_v, project_root=project_root, tail_k=tail_k)
@@ -678,7 +804,9 @@ def ablation_pair_table(
             "baseline_accept": b["accept"],
             "ablated_accept": a["accept"],
             "baseline_smoothed": b["smoothed"],
+            "baseline_smoothed_std": b["smoothed_std"],
             "ablated_smoothed": a["smoothed"],
+            "ablated_smoothed_std": a["smoothed_std"],
             "delta_smoothed": (a["smoothed"] - b["smoothed"])
                               if not (np.isnan(a["smoothed"]) or np.isnan(b["smoothed"]))
                               else float("nan"),
@@ -812,6 +940,331 @@ def novelty_routing_summary(
             "novel_mean_accept": novel_mean,
             "novelty_ratio": novelty_ratio,
         })
+    return pd.DataFrame(rows)
+
+
+def per_round_per_client_accept(
+    variants: Sequence[str],
+    *,
+    project_root: Optional[Path] = None,
+    seeds: Sequence[int] = (42, 43, 44),
+) -> pd.DataFrame:
+    """Per-(variant, round, client) accept rate, mean across seeds.
+
+    Reads each run's ``rounds.csv`` and computes
+    ``client_<i>_accepted / client_<i>_items`` per round.  Used by the
+    per-round per-client dynamics figure (the federated analogue of the
+    streaming accept-rate-over-time top panel).
+
+    Returns columns:
+        ``variant, label, family, schedule, round, client,
+        client_label, items, accepted, accept_rate, accept_rate_std,
+        n_seeds``.
+    """
+    rows: List[Dict] = []
+    for v in variants:
+        sd = variant_seed_dirs(v, seeds=seeds, project_root=project_root)
+        if not sd:
+            continue
+        # Stack per-seed rounds.csv frames keyed by `round` so we can
+        # take cross-seed mean / std per (round, client).
+        per_seed: List[pd.DataFrame] = []
+        for rdir in sd.values():
+            rd = ah.read_csv(rdir / "rounds.csv")
+            if rd is None or rd.empty:
+                continue
+            per_seed.append(rd)
+        if not per_seed:
+            continue
+        cat = pd.concat(per_seed, ignore_index=True)
+        item_cols = [c for c in cat.columns
+                     if c.startswith("client_") and c.endswith("_items")]
+        client_ids = sorted(int(c.split("_", 2)[1]) for c in item_cols)
+        family = family_for_variant(v, project_root=project_root)
+        schedule = schedule_for_variant(v)
+        # Compute per-row per-client accept rate (NaN when items==0).
+        for cid in client_ids:
+            items = cat[f"client_{cid}_items"].astype(float)
+            acc = cat[f"client_{cid}_accepted"].astype(float)
+            rate = np.where(items > 0, acc / items, np.nan)
+            tmp = pd.DataFrame({
+                "round": cat["round"],
+                "items": items,
+                "accepted": acc,
+                "rate": rate,
+            })
+            agg = tmp.groupby("round", as_index=False).agg(
+                items=("items", "mean"),
+                accepted=("accepted", "mean"),
+                accept_rate=("rate", "mean"),
+                accept_rate_std=("rate", "std"),
+                n_seeds=("rate", "count"),
+            )
+            agg["variant"] = v
+            agg["label"] = label_for(v)
+            agg["family"] = family
+            agg["schedule"] = schedule
+            agg["client"] = cid
+            agg["client_label"] = client_label(v, cid)
+            rows.append(agg)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    return out[[
+        "variant", "label", "family", "schedule",
+        "round", "client", "client_label",
+        "items", "accepted", "accept_rate", "accept_rate_std", "n_seeds",
+    ]]
+
+
+def per_client_block_composition(
+    variant: str,
+    *,
+    project_root: Optional[Path] = None,
+    seeds: Sequence[int] = (42, 43, 44),
+) -> pd.DataFrame:
+    """Per-client distribution over `stream_block`s for a single variant.
+
+    Joins the run's ``decisions.csv`` (which records the client each
+    frame was sent to) with the manifest (which gives every frame's
+    ``scene_bucket``).  The resulting fractions describe the *static*
+    partition: which blocks each client owns and in what proportion.
+    For the curated `domain_aligned` partition this just confirms the
+    config; for `contiguous` (temporal) it surfaces the empirical mix
+    inside each chronological quartile.
+
+    The first available seed is used because the partition is
+    deterministic given a (manifest, partition_strategy) pair.
+
+    Returns columns:
+        ``variant, manifest, partition, client, client_label, block,
+        n_frames, fraction, group``.
+    """
+    proj = project_root or ah.find_project_root()
+    rdir = latest_seed_dir(variant, project_root=proj)
+    if rdir is None:
+        # Fall back to whatever seed is available.
+        sd = variant_seed_dirs(variant, seeds=seeds, project_root=proj)
+        if not sd:
+            return pd.DataFrame()
+        rdir = next(iter(sd.values()))
+
+    cfg = ah.load_run_config(rdir) or {}
+    man = ah.load_manifest(proj, str(cfg.get("manifest_path", "")))
+    if man is None:
+        return pd.DataFrame()
+    frames_df = ah.manifest_to_dataframe(man)
+    if frames_df.empty or "scene_bucket" not in frames_df.columns:
+        return pd.DataFrame()
+
+    dec = ah.read_csv(rdir / "decisions.csv")
+    if dec is None or dec.empty or "client_id" not in dec.columns:
+        return pd.DataFrame()
+    # Normalise frame_id padding so the merge succeeds.
+    dec = dec.copy()
+    dec["frame_id"] = dec["frame_id"].astype(str).str.zfill(6)
+    fr = frames_df[["frame_id", "scene_bucket"]].copy()
+    fr["frame_id"] = fr["frame_id"].astype(str).str.zfill(6)
+    merged = dec.merge(fr, on="frame_id", how="left")
+    merged = merged.dropna(subset=["scene_bucket"])
+
+    counts = (merged.groupby(["client_id", "scene_bucket"], as_index=False)
+              .size().rename(columns={"size": "n_frames",
+                                      "scene_bucket": "block",
+                                      "client_id": "client"}))
+    totals = counts.groupby("client")["n_frames"].transform("sum")
+    counts["fraction"] = counts["n_frames"] / totals.replace(0, np.nan)
+    counts["client_label"] = counts["client"].map(
+        lambda c: client_label(variant, int(c)))
+    counts["group"] = counts["block"].map(client_group_for_block)
+    counts["variant"] = variant
+    counts["manifest"] = manifest_for_variant(variant)
+    counts["partition"] = (cfg.get("federated", {}) or {}).get(
+        "partition_strategy", "unknown")
+    return counts.sort_values(["client", "block"]).reset_index(drop=True)
+
+
+def _weather_bucket(scraped_weather: Optional[str], road_condition: Optional[str]) -> str:
+    """Coarse weather bucket (mirrors `evaluation.stream_blocks._weather_bucket`)."""
+    w = (scraped_weather or "").lower()
+    rc = (road_condition or "").lower()
+    if "snow" in w or "snow" in rc:
+        return "snow"
+    if "rain" in w or "wet" in rc:
+        return "rain_wet"
+    if "fog" in w or "cloud" in w or "overcast" in w:
+        return "cloudy"
+    return "clear"
+
+
+def per_client_dimension_composition(
+    variant: str,
+    *,
+    fields: Sequence[str] = ("time_of_day", "road_type", "weather"),
+    project_root: Optional[Path] = None,
+    seeds: Sequence[int] = (42, 43, 44),
+) -> Dict[str, pd.DataFrame]:
+    """Per-client fractional composition along TOD / road / weather dimensions.
+
+    Federated analogue of the streaming `stream_composition` helper:
+    each client takes the role of a stream-window slice.  For every
+    requested ``field`` we return a wide DataFrame whose index is the
+    (sorted) set of client ids and whose columns are the field's
+    categorical values, holding the *fraction* of that client's
+    accepted-or-rejected frames carrying each value.
+
+    The ``"weather"`` field is derived from the manifest's
+    ``scraped_weather`` + ``road_condition`` (mirrors the stream-block
+    labeling used at training time).  Other field names are looked up
+    directly in the manifest frame metadata.
+
+    Args:
+        variant: Variant whose decisions.csv defines the per-frame
+            client assignment.  The first available seed is used; the
+            partition is deterministic given a manifest, so the choice
+            of seed does not matter.
+        fields: Dimensions to summarise.  Defaults to the same three
+            the streaming chapter uses.
+
+    Returns:
+        ``{field: wide_df}`` -- one DataFrame per field, indexed by
+        client id.  Empty fields (no data, or all-missing) return an
+        empty DataFrame.
+    """
+    proj = project_root or ah.find_project_root()
+    rdir = latest_seed_dir(variant, project_root=proj)
+    if rdir is None:
+        sd = variant_seed_dirs(variant, seeds=seeds, project_root=proj)
+        if not sd:
+            return {f: pd.DataFrame() for f in fields}
+        rdir = next(iter(sd.values()))
+
+    cfg = ah.load_run_config(rdir) or {}
+    man = ah.load_manifest(proj, str(cfg.get("manifest_path", "")))
+    if man is None:
+        return {f: pd.DataFrame() for f in fields}
+    frames_df = ah.manifest_to_dataframe(man)
+    if frames_df.empty:
+        return {f: pd.DataFrame() for f in fields}
+
+    dec = ah.read_csv(rdir / "decisions.csv")
+    if dec is None or dec.empty or "client_id" not in dec.columns:
+        return {f: pd.DataFrame() for f in fields}
+    dec = dec[["client_id", "frame_id"]].copy()
+    dec["frame_id"] = dec["frame_id"].astype(str).str.zfill(6)
+    fr = frames_df.copy()
+    fr["frame_id"] = fr["frame_id"].astype(str).str.zfill(6)
+    if "weather" in fields and "weather" not in fr.columns:
+        fr["weather"] = [
+            _weather_bucket(row.get("scraped_weather"),
+                            row.get("road_condition"))
+            for _, row in fr.iterrows()
+        ]
+    merged = dec.merge(fr, on="frame_id", how="left")
+
+    out: Dict[str, pd.DataFrame] = {}
+    for field in fields:
+        if field not in merged.columns:
+            out[field] = pd.DataFrame()
+            continue
+        sub = merged.dropna(subset=[field])
+        if sub.empty:
+            out[field] = pd.DataFrame()
+            continue
+        counts = (sub.groupby("client_id")[field]
+                     .value_counts().unstack(fill_value=0))
+        frac = counts.div(counts.sum(axis=1).clip(lower=1), axis=0)
+        # Pin the column order using the canonical short-name maps
+        # so the legend reads in a familiar order across panels.
+        if field == "time_of_day":
+            order = ["day", "twilight", "night"]
+        elif field == "road_type":
+            order = ["city", "arterial-urban", "highway",
+                     "arterial-rural", "smaller-rural"]
+        elif field == "weather":
+            order = ["clear", "cloudy", "rain_wet", "snow"]
+        else:
+            order = sorted(frac.columns)
+        for col in order:
+            if col not in frac.columns:
+                frac[col] = 0.0
+        extras = [c for c in frac.columns if c not in order]
+        out[field] = frac[order + extras]
+        out[field].index.name = "client"
+    return out
+
+
+def per_block_accept_rate_table(
+    variants: Sequence[str],
+    *,
+    project_root: Optional[Path] = None,
+    seeds: Sequence[int] = (42, 43, 44),
+) -> pd.DataFrame:
+    """Per-(variant, stream_block) mean accept rate across the run.
+
+    Joins each variant's ``decisions.csv`` with the run's manifest
+    (``scene_bucket`` field) and computes the fraction of frames
+    accepted per block.  Aggregates across seeds with mean / std.
+
+    This is the federated analogue of `streaming.per_block_routing`:
+    one number per (filter, block) describing how much compute the
+    variant routes to that block.
+
+    Returns columns:
+        ``variant, label, family, schedule, block, group, n_frames,
+        accept_rate, accept_rate_std, n_seeds``.
+    """
+    proj = project_root or ah.find_project_root()
+    rows: List[Dict] = []
+    for v in variants:
+        sd = variant_seed_dirs(v, seeds=seeds, project_root=proj)
+        if not sd:
+            continue
+        per_seed: Dict[str, List[float]] = {}
+        per_seed_n: Dict[str, List[int]] = {}
+        family = family_for_variant(v, project_root=proj)
+        schedule = schedule_for_variant(v)
+        for rdir in sd.values():
+            cfg = ah.load_run_config(rdir) or {}
+            man = ah.load_manifest(proj, str(cfg.get("manifest_path", "")))
+            if man is None:
+                continue
+            frames_df = ah.manifest_to_dataframe(man)
+            if frames_df.empty or "scene_bucket" not in frames_df.columns:
+                continue
+            dec = ah.read_csv(rdir / "decisions.csv")
+            if dec is None or dec.empty:
+                continue
+            dec = dec.copy()
+            dec["frame_id"] = dec["frame_id"].astype(str).str.zfill(6)
+            fr = frames_df[["frame_id", "scene_bucket"]].copy()
+            fr["frame_id"] = fr["frame_id"].astype(str).str.zfill(6)
+            merged = dec.merge(fr, on="frame_id", how="left")
+            merged = merged.dropna(subset=["scene_bucket"])
+            merged["accept"] = (merged["action"] == "accept").astype(int)
+            agg = merged.groupby("scene_bucket", as_index=False).agg(
+                n_frames=("accept", "size"),
+                n_accept=("accept", "sum"),
+            )
+            agg["accept_rate"] = agg["n_accept"] / agg["n_frames"]
+            for _, row in agg.iterrows():
+                per_seed.setdefault(row["scene_bucket"], []).append(
+                    float(row["accept_rate"]))
+                per_seed_n.setdefault(row["scene_bucket"], []).append(
+                    int(row["n_frames"]))
+        for block, rates in per_seed.items():
+            rows.append({
+                "variant": v,
+                "label": label_for(v),
+                "family": family,
+                "schedule": schedule,
+                "block": block,
+                "group": client_group_for_block(block),
+                "n_frames": int(np.mean(per_seed_n[block])),
+                "accept_rate": float(np.mean(rates)),
+                "accept_rate_std": float(np.std(rates)) if len(rates) > 1 else float("nan"),
+                "n_seeds": len(rates),
+            })
     return pd.DataFrame(rows)
 
 
@@ -1058,6 +1511,12 @@ def mAP_trajectory(
 
     Columns: ``variant, label, round, items_processed_total,
     optimizer_steps_total, mAP, mAP_std, n``.
+
+    Aggregation is by ``round`` only.  ``items_processed_total`` and
+    ``optimizer_steps_total`` are averaged across seeds so they remain
+    sensible x-axes for trajectory plots (otherwise per-seed
+    differences in accept counts would split each round into multiple
+    rows and break the per-round mean).
     """
     rows = []
     for v in variants:
@@ -1075,12 +1534,20 @@ def mAP_trajectory(
         if not per_seed:
             continue
         cat = pd.concat(per_seed, ignore_index=True)
-        group_cols = [c for c in
-                      ("round", "items_processed_total", "optimizer_steps_total")
-                      if c in cat.columns]
-        agg = cat.groupby(group_cols, as_index=False)["mAP"].agg(
-            mAP="mean", mAP_std="std", n="count"
-        )
+        if "round" not in cat.columns:
+            continue
+        # Aggregate per `round`: mean / std across seeds for `mAP`,
+        # and mean for the cumulative-X columns.
+        x_cols = [c for c in ("items_processed_total",
+                              "optimizer_steps_total") if c in cat.columns]
+        agg_dict: Dict[str, Tuple[str, str]] = {
+            "mAP": ("mAP", "mean"),
+            "mAP_std": ("mAP", "std"),
+            "n": ("mAP", "count"),
+        }
+        for c in x_cols:
+            agg_dict[c] = (c, "mean")
+        agg = cat.groupby("round", as_index=False).agg(**agg_dict)
         agg.insert(0, "label", label_for(v))
         agg.insert(0, "variant", v)
         rows.append(agg)
@@ -1099,7 +1566,14 @@ def per_block_trajectory(
 ) -> pd.DataFrame:
     """Long-format per-block mAP trajectory (mean over seeds).
 
-    Columns: ``checkpoint_idx, items_processed, optimizer_steps, bucket, mAP``.
+    Columns: ``checkpoint_idx, items_processed, optimizer_steps,
+    bucket, mAP, mAP_std, n``.
+
+    Aggregation is by ``(checkpoint_idx, bucket)`` only; the cumulative
+    counters (``items_processed``, ``optimizer_steps``) are averaged
+    across seeds.  Aggregating by them as well would split each
+    (checkpoint, block) into per-seed rows because different seeds
+    accept slightly different sample counts each round.
     """
     sd = variant_seed_dirs(variant, seeds=seeds, project_root=project_root)
     parts = []
@@ -1116,10 +1590,18 @@ def per_block_trajectory(
     if not parts:
         return pd.DataFrame()
     cat = pd.concat(parts, ignore_index=True)
-    group_cols = [c for c in
-                  ("checkpoint_idx", "items_processed", "optimizer_steps", "bucket")
-                  if c in cat.columns]
-    return cat.groupby(group_cols, as_index=False)["mAP"].mean()
+    if "checkpoint_idx" not in cat.columns or "bucket" not in cat.columns:
+        return pd.DataFrame()
+    x_cols = [c for c in ("items_processed", "optimizer_steps") if c in cat.columns]
+    agg_dict: Dict[str, Tuple[str, str]] = {
+        "mAP": ("mAP", "mean"),
+        "mAP_std": ("mAP", "std"),
+        "n": ("mAP", "count"),
+    }
+    for c in x_cols:
+        agg_dict[c] = (c, "mean")
+    return cat.groupby(["checkpoint_idx", "bucket"], as_index=False).agg(
+        **agg_dict)
 
 
 # =============================================================================

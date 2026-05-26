@@ -76,6 +76,11 @@ def heatmap(
     title: Optional[str] = None,
     annotate: bool = True,
     fmt: str = "{:.3f}",
+    xtick_fontsize: float = 9.5,
+    ytick_fontsize: float = 10.0,
+    cell_fontsize: float = 9.0,
+    title_fontsize: float = 12.0,
+    xtick_rotation: float = 30.0,
 ) -> Any:
     """Render `df` as an annotated heatmap on `ax`.
 
@@ -91,6 +96,11 @@ def heatmap(
         title: Optional axes title (rendered left-aligned).
         annotate: Whether to write the numeric value into each cell.
         fmt: Format string for cell annotations.
+        xtick_fontsize: Font size for column labels.
+        ytick_fontsize: Font size for row labels.
+        cell_fontsize: Font size for in-cell numeric annotations.
+        title_fontsize: Font size for the axes title.
+        xtick_rotation: Rotation angle (degrees) for column labels.
 
     Returns:
         The `AxesImage` returned by `imshow`, useful for `colorbar`.
@@ -98,11 +108,12 @@ def heatmap(
     arr = df.to_numpy(dtype=float)
     im = ax.imshow(arr, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_xticks(range(df.shape[1]))
-    ax.set_xticklabels(df.columns, rotation=40, ha="right", fontsize=7.5)
+    ax.set_xticklabels(df.columns, rotation=xtick_rotation, ha="right",
+                       fontsize=xtick_fontsize)
     ax.set_yticks(range(df.shape[0]))
-    ax.set_yticklabels(df.index, fontsize=8)
+    ax.set_yticklabels(df.index, fontsize=ytick_fontsize)
     if title:
-        ax.set_title(title, fontsize=11, loc="left")
+        ax.set_title(title, fontsize=title_fontsize, loc="left")
     if not annotate:
         return im
     for i in range(df.shape[0]):
@@ -117,5 +128,5 @@ def heatmap(
             except Exception:
                 color = "black"
             ax.text(j, i, fmt.format(v), ha="center", va="center",
-                    fontsize=6.5, color=color)
+                    fontsize=cell_fontsize, color=color)
     return im

@@ -64,11 +64,17 @@ from . import runs as ah
 # Ordered list of variants featured in the streaming write-up.  The order
 # is also the row order for tables and the legend order for figures.
 FEATURED_VARIANTS: List[str] = [
-    # Reference baselines (curated)
+    # Reference baselines (curated).  The dense p17-p33 grid lets the
+    # iso-accept random envelope (the dotted curve in the leaderboard
+    # scatter) interpolate cleanly across every filter accept rate the
+    # m1500 sweep produces; p23 and p27 specifically pair with the
+    # reservoir/window twoRef m1500 filters at gap < 0.005.
     "no_filter_cityday_curated",
     "random_p17_cityday_curated",
     "random_p21_cityday_curated",
+    "random_p23_cityday_curated",
     "random_p26_cityday_curated",
+    "random_p27_cityday_curated",
     "random_p29_cityday_curated",
     "random_p33_cityday_curated",
     "random_p73_cityday_curated",
@@ -110,7 +116,9 @@ VARIANT_LABEL: Dict[str, str] = {
     "no_filter_cityday_curated":                          "none",
     "random_p17_cityday_curated":                         "random p17",
     "random_p21_cityday_curated":                         "random p21",
+    "random_p23_cityday_curated":                         "random p23",
     "random_p26_cityday_curated":                         "random p26",
+    "random_p27_cityday_curated":                         "random p27",
     "random_p29_cityday_curated":                         "random p29",
     "random_p33_cityday_curated":                         "random p33",
     "random_p73_cityday_curated":                         "random p73",
@@ -245,14 +253,16 @@ ISO_ACCEPT_PAIRINGS: List[Tuple[str, str]] = [
     ("adaptive_reservoir_p20_cityday_curated",           "random_p21_cityday_curated"),
     ("adaptive_reservoir_p20_twoRef_cityday_curated",    "random_p21_cityday_curated"),
     ("adaptive_reservoir_p20_noBoot_cityday_curated",    "random_p17_cityday_curated"),
-    # Matched-memory variants (m1500) - empirical accept rates landed at
-    # window 0.260 / window twoRef 0.270 / reservoir 0.233 / reservoir twoRef
-    # 0.210, so we pair against the closest existing random.  random_p26 was
-    # added (3 seeds) to give the window m1500 single-ref filter a tighter
-    # iso-accept partner than random_p29 (gap 0.029 -> 0.000).
+    # Matched-memory variants (m1500).  Empirical accept rates landed
+    # at window 0.260, window twoRef 0.270, reservoir 0.233, reservoir
+    # twoRef 0.210.  Random partners are sized to match each filter to
+    # within < 0.005: random_p23 (0.230) and random_p27 (0.270) were
+    # added specifically to close the gap for the reservoir and window
+    # twoRef m1500 filters that previously paired against p21 and p29
+    # with gaps of +0.022 and -0.019 respectively.
     ("adaptive_window_p20_m1500_cityday_curated",        "random_p26_cityday_curated"),
-    ("adaptive_window_p20_twoRef_m1500_cityday_curated", "random_p29_cityday_curated"),
-    ("adaptive_reservoir_p20_m1500_cityday_curated",     "random_p21_cityday_curated"),
+    ("adaptive_window_p20_twoRef_m1500_cityday_curated", "random_p27_cityday_curated"),
+    ("adaptive_reservoir_p20_m1500_cityday_curated",     "random_p23_cityday_curated"),
     ("adaptive_reservoir_p20_twoRef_m1500_cityday_curated", "random_p21_cityday_curated"),
     ("adaptive_window_p20_cityday_temporal",             "random_p28_cityday_temporal"),
     ("adaptive_window_p20_twoRef_cityday_temporal",      "random_p31_cityday_temporal"),
@@ -643,6 +653,7 @@ def per_block_routing(
     *,
     project_root: Optional[Path] = None,
     seeds: Sequence[int] = (42, 43, 44),
+    return_std: bool = False,
 ) -> pd.DataFrame:
     """Wide-format ``block x variant`` accept-rate grid (mean over seeds).
 
@@ -650,9 +661,20 @@ def per_block_routing(
     ``ordering.block_order`` (i.e. curated-style block partitioned
     streams).  Temporal manifests stream chronologically and have no
     block grouping; they return no rows here.
+
+    Args:
+        variants: Variant names to include as columns.
+        project_root: Project root override (defaults to autodetect).
+        seeds: Seeds to aggregate.
+        return_std: When True, returns ``(mean_grid, std_grid)`` where
+            ``std_grid`` is the per-(block, variant) cross-seed std
+            (NaN when only one seed contributed).  Default False keeps
+            the legacy mean-only return value to avoid breaking the
+            heatmap consumer.
     """
     project_root = project_root or ah.find_project_root()
-    rates: Dict[str, Dict[str, float]] = {}
+    rates_mean: Dict[str, Dict[str, float]] = {}
+    rates_std: Dict[str, Dict[str, float]] = {}
     block_order: List[str] = []
     for v in variants:
         sd = variant_seed_dirs(v, seeds=seeds, project_root=project_root)
@@ -675,20 +697,160 @@ def per_block_routing(
         if not per_seed:
             continue
         cat = pd.concat(per_seed, ignore_index=True)
-        agg = cat.groupby("block_label", as_index=False)["accept_rate"].mean()
-        rates[label_for(v)] = dict(zip(agg["block_label"], agg["accept_rate"]))
+        agg = cat.groupby("block_label", as_index=False).agg(
+            accept_mean=("accept_rate", "mean"),
+            accept_std=("accept_rate", "std"),
+        )
+        rates_mean[label_for(v)] = dict(zip(agg["block_label"], agg["accept_mean"]))
+        rates_std[label_for(v)] = dict(zip(agg["block_label"], agg["accept_std"]))
         if not block_order and man_used is not None:
             man_order = (man_used.get("ordering", {}) or {}).get("block_order", [])
             block_order = (
-                [b for b in man_order if b in rates[label_for(v)]] +
-                sorted(b for b in rates[label_for(v)] if b not in man_order)
+                [b for b in man_order if b in rates_mean[label_for(v)]] +
+                sorted(b for b in rates_mean[label_for(v)] if b not in man_order)
             )
-    if not rates:
-        return pd.DataFrame()
-    df = pd.DataFrame({lab: [rates[lab].get(b, np.nan) for b in block_order]
-                       for lab in rates},
-                      index=pd.Index(block_order, name="block"))
-    return df
+    if not rates_mean:
+        empty = pd.DataFrame()
+        return (empty, empty) if return_std else empty
+    mean_df = pd.DataFrame(
+        {lab: [rates_mean[lab].get(b, np.nan) for b in block_order]
+         for lab in rates_mean},
+        index=pd.Index(block_order, name="block"),
+    )
+    if not return_std:
+        return mean_df
+    std_df = pd.DataFrame(
+        {lab: [rates_std[lab].get(b, np.nan) for b in block_order]
+         for lab in rates_std},
+        index=pd.Index(block_order, name="block"),
+    )
+    return mean_df, std_df
+
+
+# =============================================================================
+# Per-category accept-rate routing
+# =============================================================================
+
+def per_category_routing(
+    variants: Sequence[str],
+    *,
+    project_root: Optional[Path] = None,
+    seeds: Sequence[int] = (42, 43, 44),
+    categorizers: Optional[Mapping[str, Callable[[Mapping], str]]] = None,
+    category_orders: Optional[Mapping[str, Sequence[str]]] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Per-category accept rate per variant (mean over seeds).
+
+    Buckets every post-bootstrap stream item by per-frame metadata and
+    reports what fraction of items in each bucket the filter accepted.
+    Where the per-stream-block view (`per_block_routing`) shows
+    "what *position* in the stream the filter prefers", this view
+    shows "what *kind of frame* the filter prefers" -- the natural
+    novelty-detection storyboard.
+
+    Args:
+        categorizers: ``{category_name: predicate(frame) -> str}`` mapping.
+            Each callable returns the bucket label for a given frame
+            (e.g. ``"day"``, ``"night"`` for a ``time_of_day``
+            categorizer).  When ``None``, defaults to ``time_of_day``,
+            ``road_condition``, and the curated 4-bucket weather
+            (``clear``/``cloudy``/``rain_wet``/``snow``).
+        category_orders: optional ``{category_name: ordered_bucket_list}``
+            for column ordering in the output.
+
+    Returns:
+        ``{category_name: wide_df}`` where each wide_df is shaped
+        ``(bucket, variant)`` holding accept rates.  Buckets the
+        manifest never produces are dropped from the output.
+    """
+    project_root = project_root or ah.find_project_root()
+    if categorizers is None:
+        categorizers = {
+            "time_of_day": lambda f: (f.get("time_of_day") or "").lower() or "unknown",
+            "road_condition": lambda f: (f.get("road_condition") or "").lower() or "unknown",
+            "weather": _curated_weather_bucket,
+        }
+    if category_orders is None:
+        category_orders = {
+            "time_of_day": ("day", "twilight", "night"),
+            "road_condition": ("normal", "wet", "snow"),
+            "weather": ("clear", "cloudy", "rain_wet", "snow"),
+        }
+
+    # Per-category accept-rate tables, keyed by category name.
+    out: Dict[str, Dict[str, Dict[str, float]]] = {
+        cat: {} for cat in categorizers
+    }
+    for v in variants:
+        sd = variant_seed_dirs(v, seeds=seeds, project_root=project_root)
+        if not sd:
+            continue
+        per_seed_acc: Dict[str, Dict[str, List[float]]] = {
+            cat: {} for cat in categorizers
+        }
+        for rdir in sd.values():
+            cfg = ah.load_run_config(rdir)
+            man = ah.load_manifest(project_root, cfg.get("manifest_path") if cfg else None)
+            if man is None:
+                continue
+            enr = ah.load_enriched_streaming_decisions(rdir, project_root, zod_root=None)
+            if enr.empty:
+                continue
+            for cat, pred in categorizers.items():
+                # Build per-frame bucket label from the predicate, then
+                # group decisions by bucket.
+                if "frame_id" not in enr.columns:
+                    continue
+                bucket_labels = enr[
+                    ["time_of_day", "road_condition", "scraped_weather"]
+                ].apply(lambda r: pred(r.to_dict()), axis=1)
+                tmp = pd.DataFrame({
+                    "bucket": bucket_labels,
+                    "is_accept": (enr["action"].astype(str) == "accept").astype(int),
+                })
+                agg = tmp.groupby("bucket")["is_accept"].agg(["mean", "count"])
+                for bucket, row in agg.iterrows():
+                    per_seed_acc[cat].setdefault(bucket, []).append(float(row["mean"]))
+        for cat in categorizers:
+            for bucket, vals in per_seed_acc[cat].items():
+                out[cat].setdefault(bucket, {})[label_for(v)] = float(np.mean(vals))
+
+    # Materialize wide-format DataFrames in canonical bucket order.
+    out_df: Dict[str, pd.DataFrame] = {}
+    for cat, bucket_map in out.items():
+        if not bucket_map:
+            out_df[cat] = pd.DataFrame()
+            continue
+        order = list(category_orders.get(cat) or sorted(bucket_map.keys()))
+        # Place known buckets first, then any extras (rare manifests).
+        extras = [b for b in bucket_map if b not in order]
+        idx = [b for b in order if b in bucket_map] + extras
+        cols = sorted({lab for d in bucket_map.values() for lab in d})
+        df = pd.DataFrame(
+            {lab: [bucket_map.get(b, {}).get(lab, np.nan) for b in idx] for lab in cols},
+            index=pd.Index(idx, name="bucket"),
+        )
+        out_df[cat] = df
+    return out_df
+
+
+def _curated_weather_bucket(frame: Mapping) -> str:
+    """Project-canonical 4-bucket weather: clear/cloudy/rain_wet/snow.
+
+    Mirrors `tools/preprocessing/build_manifests.py::_weather_bucket`
+    with fog folded into cloudy (since the curated manifest groups
+    those together).  Used as the default ``weather`` categorizer in
+    `per_category_routing`.
+    """
+    w = (frame.get("scraped_weather") or "").lower()
+    rc = (frame.get("road_condition") or "").lower()
+    if "snow" in w or "snow" in rc:
+        return "snow"
+    if "rain" in w or "wet" in rc:
+        return "rain_wet"
+    if "cloud" in w or "fog" in w or "overcast" in w:
+        return "cloudy"
+    return "clear"
 
 
 # =============================================================================
@@ -934,6 +1096,64 @@ def block_boundaries_and_midpoints(
         pos += size
     boundaries.append(pos)  # right edge of last block
     return boundaries, mids
+
+
+def active_intervals_by_bucket(
+    manifest: Optional[Mapping],
+    *,
+    bootstrap_frames: int = 0,
+    bucket_predicates: Mapping[str, Callable[[Mapping], bool]],
+    min_run_length: int = 100,
+) -> Dict[str, List[Tuple[int, int]]]:
+    """Per-bucket [start, end) intervals where the stream is matching the bucket.
+
+    Walks the post-bootstrap training frames in stream order and emits
+    one interval per maximal contiguous run of frames satisfying the
+    bucket's predicate.  Stream coordinates are in items-since-bootstrap
+    so they line up with ``items_processed`` in the trajectory plots.
+
+    Useful for shading "the panel's bucket is being presented" regions
+    on per-block / per-bucket trajectory figures (fig 06, 06b).
+
+    Args:
+        manifest: parsed manifest JSON.
+        bootstrap_frames: number of bootstrap frames to skip.
+        bucket_predicates: ``{bucket_name: predicate(frame) -> bool}``.
+            Each predicate returns ``True`` for frames belonging to the
+            bucket.  See e.g. ``per_block_predicate``,
+            ``time_of_day_predicate`` below for stock predicates.
+        min_run_length: discard runs shorter than this many items
+            (clamps numerical-noise blips and avoids dotting the
+            x-axis with one-frame slivers).
+
+    Returns:
+        ``{bucket_name: [(start_idx, end_idx), ...]}`` with intervals in
+        increasing-x order.  Buckets with no matching frames map to
+        ``[]``.
+    """
+    if not manifest:
+        return {b: [] for b in bucket_predicates}
+    train = [f for f in manifest.get("frames", []) if f.get("split") == "train"]
+    stream_frames = train[int(bootstrap_frames):]
+    out: Dict[str, List[Tuple[int, int]]] = {b: [] for b in bucket_predicates}
+    if not stream_frames:
+        return out
+    for bucket, pred in bucket_predicates.items():
+        run_start: Optional[int] = None
+        for i, frame in enumerate(stream_frames):
+            try:
+                hit = bool(pred(frame))
+            except Exception:  # pragma: no cover - defensive predicate guard
+                hit = False
+            if hit and run_start is None:
+                run_start = i
+            elif not hit and run_start is not None:
+                if i - run_start >= int(min_run_length):
+                    out[bucket].append((run_start, i))
+                run_start = None
+        if run_start is not None and len(stream_frames) - run_start >= int(min_run_length):
+            out[bucket].append((run_start, len(stream_frames)))
+    return out
 
 
 # =============================================================================
