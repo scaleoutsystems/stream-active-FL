@@ -36,29 +36,12 @@ def code(text: str) -> None:
 md("""\
 # Streaming detection — analysis
 
-Tables and figures backing the streaming chapter.  Heavy lifting lives
-in two package modules:
-
-- `stream_active_fl.analysis.streaming` — variant registry, headline
-  tables, per-domain grids, iso-accept pairings, ablation comparisons.
-- `stream_active_fl.analysis.figures.streaming` — accept-rate dynamics,
-  per-domain heatmaps, trajectories, ablation bars.
+Tables and figures for streaming detection.
 
 Outputs:
 
 - Tables  -> `reports/streaming/tables/*.csv`
 - Figures -> `reports/streaming/figures/*.{pdf,png}`
-
-The chapter's storyline is:
-
-1. **Accept dynamics** — does the filter route compute toward novel
-   domains?
-2. **Per-domain mAP** — does that routing translate into measurable
-   gains where it matters?
-3. **Methodology ablations** — which design choices matter?
-
-Total-val mAP sits in the appendix because it can mask both gains on
-novel domains and losses on saturated ones.
 """)
 
 md("## 1 Setup")
@@ -105,11 +88,7 @@ print(f"Variants registered: {len(sa.FEATURED_VARIANTS)}")
 
 md("""\
 ### 1a Headline variants and pairs
-
-The headline figures below use a fixed, small variant set to keep the
-plots readable.  Window vs reservoir is reported at **matched memory
-size 1500** (so the comparison is not confounded by buffer size); the
-remaining filter sweeps live in the appendix.""")
+""")
 
 code("""\
 HEADLINE_CUR = [
@@ -123,8 +102,8 @@ HEADLINE_CUR = [
 
 HEADLINE_PAIRS_CUR = [
     ("adaptive_window_p20_m1500_cityday_curated",          "random_p26_cityday_curated"),
-    ("adaptive_window_p20_twoRef_m1500_cityday_curated",   "random_p29_cityday_curated"),
-    ("adaptive_reservoir_p20_m1500_cityday_curated",       "random_p21_cityday_curated"),
+    ("adaptive_window_p20_twoRef_m1500_cityday_curated",   "random_p27_cityday_curated"),
+    ("adaptive_reservoir_p20_m1500_cityday_curated",       "random_p23_cityday_curated"),
     ("adaptive_reservoir_p20_twoRef_m1500_cityday_curated","random_p21_cityday_curated"),
 ]
 
@@ -163,10 +142,10 @@ inv[display_cols].round(4)
 """)
 
 md("""\
-### 2b Iso-accept leaderboard (headline)
+### 2b Iso-accept leaderboard
 
 Smoothed tail-`TAIL_K` mAP vs effective accept rate, restricted to the
-six headline variants and the no-filter ceiling.  The dotted grey
+headline variants and the no-filter ceiling.  The dotted grey
 curve is the iso-accept random envelope, drawn from all random
 baselines on the curated manifest.  Filters above the curve beat
 random at the same accept budget.""")
@@ -256,7 +235,7 @@ COMP_PALETTES = {
 COMP_TITLES = {
     "time_of_day": "Time-of-day composition of stream window",
     "road_type":   "Road-type composition of stream window",
-    "weather":     "Weather composition of stream window (fog folded into cloudy)",
+    "weather":     "Weather composition of stream window",
 }
 print("Curated stream:", len(BOUNDS_CUR) - 1, "blocks; boundaries =", BOUNDS_CUR)
 """)
@@ -267,38 +246,68 @@ print("Curated stream:", len(BOUNDS_CUR) - 1, "blocks; boundaries =", BOUNDS_CUR
 
 md("""\
 ## 3 Accept dynamics
-
-Does the filter route compute toward novel domains?  Two views:
-
-- **Per-block accept rate** — how each variant divides its label budget
-  across the 12 manifest blocks.  Random is roughly flat; an
-  intelligent filter over-accepts on novel blocks.
-- **Accept rate per stream window** — the same data along the time
-  axis, with stacked-area panels showing what kind of frames the
-  stream is presenting in each window (time-of-day + road condition).""")
+""")
 
 md("""\
-### 3a Per-block accept rate (headline)
+### 3a Static filter — per-category routing
+""")
 
-Headline view: filter accept rate per stream block as a polyline, with
-random and static rendered as references.  Random has uniform accept
-rate by construction (one horizontal line per accept-fraction); the
-static distribution filter saturates near 1.0 on novel blocks and is
-plotted on a twinned right-hand axis to keep the four adaptive filters
-readable on a 0-0.6 axis below.""")
+code("""\
+STATIC_INTERP_VARIANTS = [
+    "static_p20_cityday_curated",
+    "random_p21_cityday_curated",
+]
+INTERP_PANELS = ["time_of_day", "weather"]
+static_interp = sa.per_category_routing(
+    STATIC_INTERP_VARIANTS, project_root=PROJECT_ROOT)
+for cat in INTERP_PANELS:
+    if cat in static_interp and not static_interp[cat].empty:
+        static_interp[cat].to_csv(
+            TABLE_DIR / f"static_per_category_routing_{cat}.csv")
+        display(static_interp[cat].round(3))
+""")
+
+md("""\
+### 3b Static filter — accept rate over the stream
+""")
+
+code("""\
+STATIC_DYN_VARIANTS = [
+    "static_p20_cityday_curated",
+]
+accept_static = {
+    v: sa.windowed_accept_rate_aggregated(v, project_root=PROJECT_ROOT, window=ACCEPT_WINDOW)
+    for v in STATIC_DYN_VARIANTS
+}
+accept_static = {v: df for v, df in accept_static.items() if not df.empty}
+fig, _ = sf.plot_rolling_accept_rate(
+    accept_static,
+    boundaries=BOUNDS_CUR,
+    midpoints=MIDPOINTS_CUR,
+    composition=COMPOSITION_CUR,
+    composition_palettes=COMP_PALETTES,
+    composition_titles=COMP_TITLES,
+    window=ACCEPT_WINDOW)
+sf.save_figure(fig, "02b_accept_rate_with_composition_static_curated", out_dir=FIG_DIR)
+plt.show()
+""")
+
+md("""\
+### 3c Per-block accept rate (all filters)
+""")
 
 code("""\
 ROUTING_VARIANTS = [
-    "random_p21_cityday_curated",
-    "random_p33_cityday_curated",
     "static_p20_cityday_curated",
     "adaptive_window_p20_m1500_cityday_curated",
     "adaptive_window_p20_twoRef_m1500_cityday_curated",
     "adaptive_reservoir_p20_m1500_cityday_curated",
     "adaptive_reservoir_p20_twoRef_m1500_cityday_curated",
 ]
-routing = sa.per_block_routing(ROUTING_VARIANTS, project_root=PROJECT_ROOT)
+routing, routing_std = sa.per_block_routing(
+    ROUTING_VARIANTS, project_root=PROJECT_ROOT, return_std=True)
 routing.to_csv(TABLE_DIR / "per_block_routing_curated.csv")
+routing_std.to_csv(TABLE_DIR / "per_block_routing_curated_std.csv")
 display(routing.round(3))
 ROUTING_FILTERS_LINES = [
     "adaptive_window_p20_m1500_cityday_curated",
@@ -306,21 +315,18 @@ ROUTING_FILTERS_LINES = [
     "adaptive_reservoir_p20_m1500_cityday_curated",
     "adaptive_reservoir_p20_twoRef_m1500_cityday_curated",
 ]
-RANDOM_REFS = {
-    r"Random ($\\rho{=}0.21$)": float(routing[sa.label_for("random_p21_cityday_curated")].mean()),
-    r"Random ($\\rho{=}0.33$)": float(routing[sa.label_for("random_p33_cityday_curated")].mean()),
-}
 fig, _ = sf.plot_per_block_routing_lines(
     routing,
     filter_variants=ROUTING_FILTERS_LINES,
-    random_refs=RANDOM_REFS,
+    random_refs=None,
     static_variant="static_p20_cityday_curated",
+    std_grid=routing_std,
     ymax=0.55)
 sf.save_figure(fig, "01_per_block_routing_curated", out_dir=FIG_DIR)
 plt.show()
 """)
 
-md("### 3b Accept rate per stream window — adaptive filters")
+md("### 3d Accept rate per stream window — adaptive filters")
 
 code("""\
 ADAPTIVE_DYN_VARIANTS = [
@@ -346,53 +352,25 @@ sf.save_figure(fig, "02_accept_rate_with_composition_curated", out_dir=FIG_DIR)
 plt.show()
 """)
 
-md("""\
-### 3c Accept-rate dynamics — static filters
-
-For comparison, the static distribution filter (reference fixed at
-bootstrap, no refresh) saturates near 1.0 on novel night/twilight
-blocks: its fixed reference cannot distinguish novel from everything,
-so it lets nearly all such frames through and stops being
-budget-controlled.""")
-
-code("""\
-STATIC_DYN_VARIANTS = [
-    "static_p15_cityday_curated",
-    "static_p20_cityday_curated",
-]
-accept_static = {
-    v: sa.windowed_accept_rate_aggregated(v, project_root=PROJECT_ROOT, window=ACCEPT_WINDOW)
-    for v in STATIC_DYN_VARIANTS
-}
-accept_static = {v: df for v, df in accept_static.items() if not df.empty}
-fig, _ = sf.plot_rolling_accept_rate(
-    accept_static,
-    boundaries=BOUNDS_CUR,
-    midpoints=MIDPOINTS_CUR,
-    composition=COMPOSITION_CUR,
-    composition_palettes=COMP_PALETTES,
-    composition_titles=COMP_TITLES,
-    window=ACCEPT_WINDOW)
-sf.save_figure(fig, "02b_accept_rate_with_composition_static_curated", out_dir=FIG_DIR)
-plt.show()
-""")
-
 # =============================================================================
 # 4. Per-domain performance
 # =============================================================================
 
 md("""\
 ## 4 Per-domain performance
-
-Does the routing translate into a per-domain gain?  Per-domain mAP is
-the headline metric because total-val mAP can mask both wins on novel
-domains and losses on saturated ones.""")
+""")
 
 md("### 4a Per-domain end-of-stream mAP — headline variants (curated)")
 
 code("""\
 grid_cur = sa.per_domain_grid(HEADLINE_CUR, project_root=PROJECT_ROOT, tail_k=TAIL_K)
 grid_cur.to_csv(TABLE_DIR / "per_domain_curated.csv")
+# Balanced (mean over blocks) + worst-block summary, useful as a
+# results-chapter table without exposing the full 12-block grid.
+summary_cur = sa.per_domain_summary(
+    HEADLINE_CUR, project_root=PROJECT_ROOT, tail_k=TAIL_K)
+summary_cur.to_csv(TABLE_DIR / "per_domain_summary_curated.csv", index=False)
+display(summary_cur.round(4))
 fig, _ = sf.plot_per_domain_heatmap(
     grid_cur)
 sf.save_figure(fig, "03_per_domain_heatmap_curated", out_dir=FIG_DIR)
@@ -438,32 +416,69 @@ sf.save_figure(fig, "05_iso_accept_delta_curated", out_dir=FIG_DIR)
 plt.show()
 """)
 
-md("### 4d Per-block mAP trajectory through the stream")
+md("""\
+### 4d Trajectory by content category
+
+**Bucketing convention.** Categories are taken from the raw frame
+metadata: `night` and `twilight` are the time_of_day field;
+`wet` and `snow` are the road_condition field.  The `wet`
+panel here is *not* identical to the derived `rain_wet` bucket
+shown in the composition figures (which is "scraped_weather
+contains rain OR road_condition is wet"); per-domain mAP is only
+evaluated against the marginal `road_condition` axis, so the panel
+title matches the data column verbatim.  Adding `weather_bucket` as
+a fourth evaluation dimension would require re-running all
+streaming experiments.""")
 
 code("""\
-TRAJ_VARIANTS_CUR = [
+def _category_trajs(variants):
+    parts_tod = {
+        v: sa.per_domain_trajectory(
+            v, ["night", "twilight"], dim="time_of_day", project_root=PROJECT_ROOT)
+        for v in variants
+    }
+    parts_rc = {
+        v: sa.per_domain_trajectory(
+            v, ["snow", "wet"], dim="road_condition", project_root=PROJECT_ROOT)
+        for v in variants
+    }
+    out = {}
+    for v in variants:
+        parts = [df for df in (parts_tod.get(v), parts_rc.get(v))
+                 if df is not None and not df.empty]
+        if parts:
+            out[v] = pd.concat(parts, ignore_index=True)
+    return out
+
+CATEGORY_BUCKETS = ["night", "twilight", "wet", "snow"]
+
+# Fig 06: Window family (iso-accept random_p27).  Window two-ref's
+# empirical accept rate is 0.272; random_p27 lands at 0.272 (gap 0).
+TRAJ_VARIANTS_WIN = [
+    "no_filter_cityday_curated",
+    "random_p27_cityday_curated",
+    "adaptive_window_p20_twoRef_m1500_cityday_curated",
+]
+fig, _ = sf.plot_per_block_trajectory(
+    _category_trajs(TRAJ_VARIANTS_WIN), CATEGORY_BUCKETS,
+    x_col="items_processed", n_cols=2, smoothing_window=5,
+    active_intervals=None)
+sf.save_figure(fig, "06_per_category_trajectory_window", out_dir=FIG_DIR)
+plt.show()
+
+# Fig 06b: Reservoir family (iso-accept random_p21).  Reservoir
+# two-ref's empirical accept rate is 0.213; random_p21 lands at 0.213
+# (gap 0).
+TRAJ_VARIANTS_RES = [
     "no_filter_cityday_curated",
     "random_p21_cityday_curated",
-    "adaptive_window_p20_twoRef_m1500_cityday_curated",
     "adaptive_reservoir_p20_twoRef_m1500_cityday_curated",
 ]
-NOVEL_BLOCKS = [
-    "city_night",
-    "city_twilight",
-    "highway_twi-night",
-    "arterial-rural_twi-night",
-    "arterial-urban_twi-night",
-    "smaller-rural_all",
-]
-trajectories_cur = {
-    v: sa.per_domain_trajectory(v, NOVEL_BLOCKS, project_root=PROJECT_ROOT)
-    for v in TRAJ_VARIANTS_CUR
-}
-trajectories_cur = {v: df for v, df in trajectories_cur.items() if not df.empty}
 fig, _ = sf.plot_per_block_trajectory(
-    trajectories_cur, NOVEL_BLOCKS,
-    x_col="items_processed", n_cols=2, smoothing_window=3)
-sf.save_figure(fig, "06_per_block_trajectory_curated", out_dir=FIG_DIR)
+    _category_trajs(TRAJ_VARIANTS_RES), CATEGORY_BUCKETS,
+    x_col="items_processed", n_cols=2, smoothing_window=5,
+    active_intervals=None)
+sf.save_figure(fig, "06b_per_category_trajectory_reservoir", out_dir=FIG_DIR)
 plt.show()
 """)
 
@@ -473,11 +488,7 @@ plt.show()
 
 md("""\
 ## 5 Cross-stream-order replication (temporal manifest)
-
-The temporal manifest streams chronologically rather than in curated
-domain blocks.  If the filter genuinely tracks novelty the same kind of
-accept dynamics and per-domain wins should reproduce here, without
-relying on a hand-curated block order.""")
+""")
 
 code("""\
 sample_dir_tmp = sa.latest_seed_dir("no_filter_cityday_temporal", 42, project_root=PROJECT_ROOT)
@@ -530,6 +541,10 @@ md("### 5b Per-domain mAP and Δ-mAP (temporal)")
 code("""\
 grid_tmp = sa.per_domain_grid(HEADLINE_TMP, project_root=PROJECT_ROOT, tail_k=TAIL_K)
 grid_tmp.to_csv(TABLE_DIR / "per_domain_temporal.csv")
+summary_tmp = sa.per_domain_summary(
+    HEADLINE_TMP, project_root=PROJECT_ROOT, tail_k=TAIL_K)
+summary_tmp.to_csv(TABLE_DIR / "per_domain_summary_temporal.csv", index=False)
+display(summary_tmp.round(4))
 fig, _ = sf.plot_per_domain_heatmap(
     grid_tmp)
 sf.save_figure(fig, "08_per_domain_heatmap_temporal", out_dir=FIG_DIR)
@@ -549,15 +564,7 @@ plt.show()
 
 md("""\
 ## 6 Methodology ablations
-
-Three controlled comparisons that justify the design:
-
-- **Static vs adaptive** — bootstrap-only Mahalanobis vs periodic
-  refresh.
-- **Two-reference Mahalanobis** — keeping the bootstrap Gaussian
-  alongside the adaptive Gaussian instead of replacing it.
-- **Bootstrap anchor (noBoot)** — zeroing out the bootstrap anchor;
-  tests whether the anchor is doing real work.""")
+""")
 
 md("### 6a Static vs adaptive at p20")
 
@@ -616,10 +623,7 @@ plt.show()
 
 md("""\
 ## 7 Iso-accept fairness (full sweep)
-
-Filter ↔ closest-random pairings across the full streaming variant
-registry.  The matched-memory rows above (§4c) are the headline
-subset; this table is the long form for the appendix.""")
+""")
 
 code("""\
 iso = sa.iso_accept_table(project_root=PROJECT_ROOT, tail_k=TAIL_K)
@@ -631,15 +635,12 @@ iso[iso_display_cols].round(4)
 """)
 
 # =============================================================================
-# 8. Appendix
+# 8. Supporting analyses
 # =============================================================================
 
 md("""\
-## 8 Appendix — supporting analyses
-
-Full sweeps over all featured variants, plus per-class /
-forgetting / compute / total-mAP diagnostics.  These do not feed
-the main narrative.""")
+## 8 Supporting analyses
+""")
 
 md("### 8a Full per-domain heatmap (all featured variants)")
 
@@ -654,12 +655,7 @@ plt.show()
 
 md("""\
 ### 8b Iso-accept leaderboard (full sweep)
-
-Same scatter as the headline leaderboard but with every featured
-variant on the curated manifest, including p15 budgets, single-ref
-adaptive filters, the no-anchor ablation, and the static p15.
-Annotations on every point so the appendix figure stays a complete
-record at the cost of some clutter.""")
+""")
 
 code("""\
 fig, _ = sf.plot_inventory_scatter(
